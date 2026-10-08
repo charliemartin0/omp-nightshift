@@ -1,0 +1,28 @@
+{
+  "generatedAt": 1791403684917,
+  "reports": [
+    {
+      "provider": "openai-codex",
+      "limits": [
+        { "id": "openai-codex:primary", "scope": { "provider": "openai-codex", "windowId": "5h" }, "window": { "id": "5h", "resetsAt": 1791421548000 }, "amount": { "remainingFraction": 1, "unit": "percent" }, "status": "ok" },
+        { "id": "openai-codex:secondary", "scope": { "provider": "openai-codex", "windowId": "7d" }, "window": { "id": "7d", "resetsAt": 1791963650000 }, "amount": { "remainingFraction": 0.79, "unit": "percent" }, "status": "ok" }
+      ],
+      "metadata": { "planType": "plus", "allowed": true, "limitReached": false }
+    },
+    {
+      "provider": "anthropic",
+      "limits": [
+        { "id": "anthropic:5h", "scope": { "provider": "anthropic", "windowId": "5h" }, "window": { "id": "5h", "resetsAt": 1791418200000 }, "amount": { "remainingFraction": 0.86, "unit": "percent" }, "status": "ok" },
+        { "id": "anthropic:7d", "scope": { "provider": "anthropic", "windowId": "7d" }, "window": { "id": "7d", "resetsAt": 1791475200000 }, "amount": { "remainingFraction": 0.37, "unit": "percent" }, "status": "ok" }
+      ],
+      "metadata": {}
+    },
+    {
+      "provider": "cursor",
+      "limits": [
+        { "id": "cursor:usd:individual-api", "scope": { "provider": "cursor", "windowId": "monthly" }, "window": { "id": "monthly", "resetsAt": 1792942690000 }, "amount": { "remainingFraction": 0.06, "unit": "usd" }, "status": "warning" }
+      ],
+      "metadata": {}
+    }
+  ]
+}

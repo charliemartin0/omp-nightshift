@@ -1,0 +1,8 @@
+{
+  "task": "anthropic/claude-sonnet-5-5",
+  "slow": "anthropic/claude-opus-5-5",
+  "plan": "anthropic/claude-opus-5-5",
+  "smol": "anthropic/claude-haiku-5-5",
+  "commit": "anthropic/claude-haiku-5-5",
+  "default": "anthropic/claude-sonnet-5-5"
+}
