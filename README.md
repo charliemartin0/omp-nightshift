@@ -75,10 +75,12 @@ Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk
 `~/.omp/overnight/<repoName>/lock`.
 
 ## Quota
-7d floors and 7d exhaustion stop the run. When every provider in the build role's fallback chain is below the
-reserve (`reservePct`, default 40) on a short window, the runner logs `quota_wait`, sleeps until the earliest
-reset + 2 min (re-checking every 10 min), and never past the stop time (`stop_time`). A chunk killed by a
-quota/429 error returns to `pending` (at most 3 times) without counting as a failure.
+A provider under its 7d floor (or 7d-exhausted) is unusable but does not stop the run while another provider in the
+build role's fallback chain is usable. A chain provider is also unusable when `limitReached` or below the reserve
+(`reservePct`, default 40) on any window. When every chain provider is unusable and one recovers on a short window,
+the runner logs `quota_wait`, sleeps until the earliest reset + 2 min (re-checking every 10 min), and never past the
+stop time (`stop_time`). If none can recover (7d only) the run stops with `quota_floor` / `quota_limit_reached`. A
+chunk killed by a quota/429 error returns to `pending` (at most 3 times) without counting as a failure.
 
 ## Modules
 Pure libs: `backlog`, `quota`, `watchdog`, `overlay`. Runner: `runner` (loop), `chunk` (setup, agent, resumes),

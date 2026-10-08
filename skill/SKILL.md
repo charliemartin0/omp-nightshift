@@ -74,7 +74,7 @@ One batched `ask`; the first option is the recommended default.
 
 - Stop time: `07:00` / `06:00` / `08:00`.
 - Max PRs: `4` / `2` / `6`.
-- Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, others >=25%` / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
+- Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, others >=25%` / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
 - Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
 - Models: `plan @default, build @smol` / `plan @default, build @default` / `plan @smol, build @smol`.
 - PR mode: `Independent drafts off <trunk>` / `One stack`.
@@ -105,4 +105,4 @@ Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, reserve
 
 - Never run `CLI run`. Never run chunk work, `gt`, `gh pr`, or push from this session.
 - Never remove worktrees, branches, or PRs.
-- 5h (non-7d) exhaustion of the whole build chain makes the runner wait for the reset instead of stopping; 7d floors still stop.
+- A provider under its 7d floor is skipped, not fatal: the run continues on other providers in the build chain. If every chain provider is unusable, a short-window (5h) reset makes the runner wait for it; otherwise (7d floors only) the run stops.

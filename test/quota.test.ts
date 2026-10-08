@@ -11,28 +11,47 @@ const ev = (u: unknown, f = floors, c = chain) => evaluateQuota(u, f, c, 40);
 
 test("healthy usage ok", () => expect(ev(usage)).toEqual({ ok: true }));
 
-test("anthropic 7d below floor", () => {
+test("anthropic under its floor while openai-codex is usable -> ok", () => {
   const u = clone();
   lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
-  expect(ev(u)).toEqual({ ok: false, reason: "quota_floor", detail: "anthropic 7d 0.20 < 0.25" });
+  expect(ev(u)).toEqual({ ok: true });
 });
 
-test("7d at 0 is limit_reached", () => {
+test("every chain provider under its floor -> quota_floor listing each", () => {
   const u = clone();
-  lim(u, "openai-codex", "7d").amount.remainingFraction = 0;
-  expect(ev(u)).toEqual({ ok: false, reason: "quota_limit_reached", detail: "openai-codex 7d exhausted" });
+  lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
+  lim(u, "openai-codex", "7d").amount.remainingFraction = 0.4;
+  expect(ev(u, floors, ["anthropic", "openai-codex"])).toEqual({
+    ok: false,
+    reason: "quota_floor",
+    detail: "build chain unusable: anthropic 7d 0.20 < 0.25, openai-codex 7d 0.40 < 0.50",
+  });
 });
 
-test("floor provider missing from reports", () => {
-  const r = ev(usage, { ...floors, google: 0.1 });
+test("anthropic under floor, openai 5h exhausted -> quota_wait on openai reset", () => {
+  const u = clone();
+  const reset = Date.parse("2026-10-08T17:12:00Z");
+  lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
+  lim(u, "openai-codex", "5h").amount.remainingFraction = 0;
+  lim(u, "openai-codex", "5h").window.resetsAt = reset;
+  expect(ev(u, floors, ["anthropic", "openai-codex"])).toMatchObject({
+    ok: false, reason: "quota_wait", provider: "openai-codex", window: "5h", resetsAt: reset,
+  });
+});
+
+test("providers outside the chain never stop the run", () => {
+  const u = clone();
+  lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
+  expect(ev(u, floors, ["openai-codex"])).toEqual({ ok: true });
+});
+
+test("no chain: floors are hard stops; missing report is unknown", () => {
+  const u = clone();
+  lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
+  expect(ev(u, floors, [])).toEqual({ ok: false, reason: "quota_floor", detail: "anthropic 7d 0.20 < 0.25" });
+  const r = ev(null, floors, []);
   expect(r.ok === false && r.reason).toBe("quota_unknown");
 });
-
-test("garbage usage is unknown", () => {
-  const r = ev(null);
-  expect(r.ok === false && r.reason).toBe("quota_unknown");
-});
-
 test("multiple anthropic accounts: max 7d wins", () => {
   const u = clone();
   const second = structuredClone(rep(u, "anthropic"));
