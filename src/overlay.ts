@@ -1,23 +1,21 @@
-const BASE_CHAIN_KEYS = ["default", "task", "slow", "plan", "smol", "commit"];
-
 const q = (s: string) => JSON.stringify(s);
-const banned = (v: string) => /opus/i.test(v) || v.startsWith("cursor/");
 
-export function buildOverlay(roles: Record<string, string>, chains: Record<string, string[]>): string {
-  if (typeof roles.default === "string" && banned(roles.default)) {
-    throw new Error(`overlay: default role is ${roles.default}; no Opus/Cursor allowed`);
-  }
-  const outRoles: Record<string, string> = { slow: "@default", plan: "@default" };
-  for (const [k, v] of Object.entries(roles)) {
-    if (typeof v === "string" && banned(v)) outRoles[k] = "@default";
-  }
-  const keys = [...new Set([...BASE_CHAIN_KEYS, ...Object.keys(chains)])];
+/** Overlay YAML: the live modelRoles and fallbackChains verbatim, usageReservePct from the run. */
+export function buildOverlay(roles: Record<string, string>, chains: Record<string, string[]>, reservePct: number): string {
   const lines: string[] = ["modelRoles:"];
-  for (const [k, v] of Object.entries(outRoles)) lines.push(`  ${q(k)}: ${q(v)}`);
-  lines.push("retry:", "  usageReservePct: 25", "  waitForUsageReset: false", "  fallbackChains:");
-  for (const k of keys) {
-    const kept = (chains[k] ?? []).filter((e) => e.startsWith("openai/") || e.startsWith("openai-codex/"));
-    lines.push(`    ${q(k)}: [${kept.map(q).join(", ")}]`);
+  for (const [k, v] of Object.entries(roles)) lines.push(`  ${q(k)}: ${q(v)}`);
+  lines.push(
+    "retry:",
+    "  modelFallback: true",
+    "  usageAwareFallback: true",
+    `  usageReservePct: ${reservePct}`,
+    "  waitForUsageReset: false",
+  );
+  const keys = Object.keys(chains);
+  if (keys.length === 0) lines.push("  fallbackChains: {}");
+  else {
+    lines.push("  fallbackChains:");
+    for (const k of keys) lines.push(`    ${q(k)}: [${chains[k].map(q).join(", ")}]`);
   }
   lines.push(
     "providers:", "  streamIdleTimeoutSeconds: 300",
@@ -25,4 +23,25 @@ export function buildOverlay(roles: Record<string, string>, chains: Record<strin
     "completion:", '  notify: "off"',
   );
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Providers omp may use for `model` (a model string or `@role`): the primary plus its fallback chain,
+ * unique, in order.
+ */
+export function buildChainProviders(
+  model: string,
+  roles: Record<string, string>,
+  chains: Record<string, string[]>,
+): string[] {
+  const entries: (string | undefined)[] = model.startsWith("@")
+    ? [roles[model.slice(1)], ...(chains[model.slice(1)] ?? [])]
+    : [model, ...(chains[model] ?? [])];
+  const out: string[] = [];
+  for (const e of entries) {
+    if (!e) continue;
+    const p = e.split("/")[0];
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
 }

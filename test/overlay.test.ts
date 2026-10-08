@@ -1,29 +1,37 @@
 import { expect, test } from "bun:test";
-import { buildOverlay } from "../src/overlay";
+import { buildChainProviders, buildOverlay } from "../src/overlay";
+import { validateRunJson } from "../src/runjson";
 import roles from "./fixtures/roles.json";
 import chains from "./fixtures/chains.json";
 
-test("real config: no cursor or opus", () => {
-  const y = buildOverlay(roles, chains);
-  expect(y).not.toMatch(/cursor\//);
-  expect(y).not.toMatch(/opus/i);
-  expect(y).toContain('"slow": "@default"');
-  expect(y).toContain('"plan": "@default"');
+test("real config keeps every chain entry and role", () => {
+  const y = buildOverlay(roles, chains, 40);
+  for (const [k, entries] of Object.entries(chains)) {
+    expect(y).toContain(`"${k}": [${entries.map((e) => JSON.stringify(e)).join(", ")}]`);
+  }
+  expect(y).toContain('"plan": "anthropic/claude-opus-5-5"');
+  expect(y).toContain("cursor/grok-4.7");
   expect(y).toContain('notify: "off"');
 });
 
-test("smol chain keeps only openai entries", () => {
-  expect(buildOverlay(roles, chains)).toContain('"smol": ["openai-codex/gpt-6-luna"]');
+test("reservePct honoured, default 40", () => {
+  const y = buildOverlay(roles, chains, 60);
+  expect(y).toContain("usageReservePct: 60");
+  expect(y).toContain("waitForUsageReset: false");
+  const run = {
+    version: 1, repo: "/tmp", repoName: "r", date: "2026-01-01", goal: "g", runDir: "/tmp/x", worktreeRoot: "/tmp/wt",
+    unit: "omp-overnight-r", remote: "origin", trunk: "main", forge: "local", prMode: "independent", stopAt: "06:00",
+    maxPrs: 3, floors: {}, models: { plan: "p", build: "b", report: "r" }, setupCommand: "", preflightTest: "true", limits: {},
+  };
+  expect(validateRunJson(run).reservePct).toBe(40);
+  expect(validateRunJson({ ...run, reservePct: 30 }).reservePct).toBe(30);
 });
 
-test("all base chain keys emitted even if absent", () => {
-  const y = buildOverlay(roles, {});
-  for (const k of ["default", "task", "slow", "plan", "smol", "commit"]) expect(y).toContain(`"${k}": []`);
+test("empty chains stay valid yaml", () => {
+  expect(buildOverlay(roles, {}, 40)).toContain("  fallbackChains: {}\n");
 });
 
-test("default role opus or cursor throws", () => {
-  expect(() => buildOverlay({ ...roles, default: "anthropic/claude-opus-5-5" }, chains)).toThrow(
-    "overlay: default role is anthropic/claude-opus-5-5; no Opus/Cursor allowed",
-  );
-  expect(() => buildOverlay({ ...roles, default: "cursor/x" }, chains)).toThrow(/no Opus\/Cursor/);
+test("buildChainProviders follows role + chain order", () => {
+  expect(buildChainProviders("@smol", roles, chains)).toEqual(["anthropic", "openai-codex", "cursor", "opencode-go"]);
+  expect(buildChainProviders("openai-codex/x", roles, chains)).toEqual(["openai-codex"]);
 });

@@ -2,31 +2,35 @@
   "default": [
     "openai-codex/gpt-6.1-sol",
     "cursor/grok-4.7",
-    "cursor/muse-spark-1.3"
+    "cursor/muse-spark-1.3",
+    "opencode-go/mimo-v2.6-pro"
   ],
   "task": [
     "openai-codex/gpt-6.1-sol",
     "cursor/grok-4.7",
-    "cursor/muse-spark-1.3"
+    "cursor/muse-spark-1.3",
+    "opencode-go/mimo-v2.6-pro"
   ],
   "slow": [
     "openai-codex/gpt-6.1-sol",
     "cursor/grok-4.7",
-    "cursor/muse-spark-1.3"
+    "cursor/muse-spark-1.3",
+    "opencode-go/mimo-v2.6-pro"
   ],
   "plan": [
     "openai-codex/gpt-6.1-sol",
     "cursor/grok-4.7",
-    "cursor/muse-spark-1.3"
+    "cursor/muse-spark-1.3",
+    "opencode-go/mimo-v2.6-pro"
   ],
   "smol": [
     "openai-codex/gpt-6-luna",
     "cursor/composer-2.5",
-    "cursor/gemini-3.8-flash"
+    "opencode-go/glm-5.3-flash"
   ],
   "commit": [
     "openai-codex/gpt-6-luna",
     "cursor/composer-2.5",
-    "cursor/gemini-3.8-flash"
+    "opencode-go/glm-5.3-flash"
   ]
 }

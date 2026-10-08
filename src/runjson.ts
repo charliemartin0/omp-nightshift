@@ -26,11 +26,15 @@ export interface RunJson {
   stopAt: string;
   maxPrs: number;
   floors: Record<string, number>;
+  /** omp's `retry.usageReservePct` for the run overlay (percent left below which omp switches models) */
+  reservePct: number;
   models: { plan: string; build: string; report: string };
   setupCommand: string;
   preflightTest: string;
   limits: Limits;
 }
+
+export const RESERVE_PCT_DEFAULT = 40;
 
 export const LIMIT_DEFAULTS: Limits = {
   maxTime: "90m",
@@ -42,8 +46,9 @@ export const LIMIT_DEFAULTS: Limits = {
 
 const TOP_KEYS = [
   "version", "repo", "repoName", "date", "goal", "runDir", "worktreeRoot", "unit", "remote", "trunk", "forge",
-  "prMode", "stopAt", "maxPrs", "floors", "models", "setupCommand", "preflightTest", "limits",
+  "prMode", "stopAt", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
 ];
+const OPTIONAL_KEYS = ["reservePct"];
 const MODEL_KEYS = ["plan", "build", "report"];
 
 export function sanitizeRepoName(name: string): string {
@@ -98,7 +103,7 @@ function absPath(o: Record<string, unknown>, k: string): string {
 export function validateRunJson(x: unknown): RunJson {
   const o = obj(x, "root");
   noUnknown(o, TOP_KEYS, "root");
-  for (const k of TOP_KEYS) if (!(k in o)) throw new Error(`run.json: missing key ${k}`);
+  for (const k of TOP_KEYS) if (!(k in o) && !OPTIONAL_KEYS.includes(k)) throw new Error(`run.json: missing key ${k}`);
   if (o.version !== 1) throw new Error("run.json: version must be 1");
 
   const repo = absPath(o, "repo");
@@ -139,6 +144,7 @@ export function validateRunJson(x: unknown): RunJson {
     stopAt: str(o, "stopAt", /^([01]\d|2[0-3]):[0-5]\d$/),
     maxPrs: num(o.maxPrs, "maxPrs", 1, Infinity, true),
     floors,
+    reservePct: o.reservePct === undefined ? RESERVE_PCT_DEFAULT : num(o.reservePct, "reservePct", 0, 99, true),
     models,
     setupCommand: str(o, "setupCommand", undefined, true),
     preflightTest: str(o, "preflightTest"),

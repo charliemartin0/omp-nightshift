@@ -38,6 +38,8 @@ Produce 3-12 chunks:
 
 Also pick `setupCommand` (dependency install for a fresh worktree, e.g. `npm ci`, `dotnet restore`; empty if none) and `preflightTest` (an existing passing suite or harness smoke such as `npx playwright test --list`).
 
+Never write model or provider restrictions (e.g. "use OpenAI only", "no Cursor") into the goal, chunk scope, or done-when; model choice is the overlay's job.
+
 Write `<runDir>/backlog.md` in exactly this format (id regex `^[a-z0-9][a-z0-9-]{0,40}$`; `test` may be wrapped in one backtick pair):
 
 ```md
@@ -72,7 +74,8 @@ One batched `ask`; the first option is the recommended default.
 
 - Stop time: `07:00` / `06:00` / `08:00`.
 - Max PRs: `4` / `2` / `6`.
-- Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, never Cursor` / `Anthropic >=40%, OpenAI >=60%` / `Anthropic >=15%, OpenAI >=30%`. Only include providers present in `omp usage --json`. Cursor is never a floor or fallback. Provider ids: `anthropic`, `openai-codex`.
+- Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, others >=25%` / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
+- Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
 - Models: `plan @default, build @smol` / `plan @default, build @default` / `plan @smol, build @smol`.
 - PR mode: `Independent drafts off <trunk>` / `One stack`.
 - Only for a non-work GitHub remote, delivery: `Local branches only` (recommended; forge `local`) / `Push + gh draft PR` (forge `github`).
@@ -85,7 +88,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is `HH:MM` local,
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
   "runDir": "/abs", "worktreeRoot": "/abs", "unit": "omp-overnight-<repoName>-<date>",
   "remote": "origin", "trunk": "main", "forge": "graphite|github|local", "prMode": "independent|stack",
-  "stopAt": "HH:MM", "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5 },
+  "stopAt": "HH:MM", "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
@@ -93,7 +96,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is `HH:MM` local,
 
 Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
 
-Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, models, chunk table (id, test, status), run dir. Then run `CLI launch <runDir>/run.json`.
+Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, reserve, models, chunk table (id, test, status), run dir. Then run `CLI launch <runDir>/run.json`.
 
 - Preflight FAIL: show the failing checks, `ask` `Fix and retry` / `Abort`.
 - Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell the user the session can be closed, end the turn.
@@ -102,3 +105,4 @@ Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, models,
 
 - Never run `CLI run`. Never run chunk work, `gt`, `gh pr`, or push from this session.
 - Never remove worktrees, branches, or PRs.
+- 5h (non-7d) exhaustion of the whole build chain makes the runner wait for the reset instead of stopping; 7d floors still stop.

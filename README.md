@@ -65,7 +65,7 @@ Stop a run with `/skill:overnight stop`; it leaves real worktrees, branches, and
 ## Run directory
 `<repo>/.omp/overnight/<date>/` when git-ignored there, else `~/.omp/overnight/<repoName>/<date>/`:
 
-- `run.json` (written by the skill), `backlog.md`, `overlay.yml` (Opus/Cursor removed from roles and fallbacks)
+- `run.json` (written by the skill), `backlog.md`, `overlay.yml` (your modelRoles and fallback chains unchanged; `usageReservePct` from `reservePct`, default 40)
 - `ledger.jsonl` (`ledger.dry-run.jsonl`), `report.md` (`report.dry-run.md`)
 - `prompts/<id>.md`, `prompts/report.md`
 - `sessions/<id>/` omp session dirs
@@ -73,6 +73,12 @@ Stop a run with `/skill:overnight stop`; it leaves real worktrees, branches, and
 
 Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk-id>`; the run lock is
 `~/.omp/overnight/<repoName>/lock`.
+
+## Quota
+7d floors and 7d exhaustion stop the run. When every provider in the build role's fallback chain is below the
+reserve (`reservePct`, default 40) on a short window, the runner logs `quota_wait`, sleeps until the earliest
+reset + 2 min (re-checking every 10 min), and never past the stop time (`stop_time`). A chunk killed by a
+quota/429 error returns to `pending` (at most 3 times) without counting as a failure.
 
 ## Modules
 Pure libs: `backlog`, `quota`, `watchdog`, `overlay`. Runner: `runner` (loop), `chunk` (setup, agent, resumes),

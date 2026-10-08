@@ -2,13 +2,26 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Status, setChunkStatus } from "./backlog";
 import { Ledger } from "./ledger";
+import { spawnGroup } from "./proc";
 import { type RunJson, resolveStopAt } from "./runjson";
+
+export interface Clock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) };
 
 export interface Ctx {
   run: RunJson;
   dryRun: boolean;
   ledger: Ledger;
   stopAtMs: number;
+  /** providers of the build model's fallback chain (set from the overlay; empty = no chain check) */
+  buildProviders: string[];
+  clock: Clock;
+  /** `omp usage --json` parsed; null when unparseable */
+  readUsage(): Promise<unknown>;
   /** chunk currently in status `running` (for the signal handler / crash path) */
   running: string | null;
   backlog: string;
@@ -33,6 +46,16 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
     dryRun,
     ledger: new Ledger(join(run.runDir, dryRun ? "ledger.dry-run.jsonl" : "ledger.jsonl")),
     stopAtMs: resolveStopAt(run.stopAt).getTime(),
+    buildProviders: [],
+    clock: realClock,
+    async readUsage() {
+      const r = await spawnGroup(["omp", "usage", "--json"], { cwd: run.repo, timeoutMs: 60_000 });
+      try {
+        return JSON.parse(r.stdout);
+      } catch {
+        return null;
+      }
+    },
     running: null,
     backlog,
     overlay: join(run.runDir, "overlay.yml"),

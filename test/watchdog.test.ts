@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Watchdog } from "../src/watchdog";
+import { QUOTA_ERROR_RE, Watchdog } from "../src/watchdog";
 
 const lines = (await Bun.file(new URL("./fixtures/stream.jsonl", import.meta.url)).text()).split("\n").filter(Boolean);
 const mk = (o: Partial<ConstructorParameters<typeof Watchdog>[0]> = {}) =>
@@ -54,4 +54,14 @@ test("tokensUsed seeds total", () => {
   expect(w.tokens).toBe(500);
   w.onLine(lines[2], 1);
   expect(w.tokens).toBe(670);
+});
+
+test("final assistant error sets lastError; a later normal message clears it", () => {
+  const w = mk();
+  const err = "Codex error event: The usage limit has been reached (code=usage_limit_reached)";
+  w.onLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }), 1);
+  expect(w.lastError).toBe(err);
+  expect(QUOTA_ERROR_RE.test(err)).toBe(true);
+  w.onLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }), 2);
+  expect(w.lastError).toBeNull();
 });

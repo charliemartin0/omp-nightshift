@@ -12,9 +12,13 @@ import { writeReport } from "./report";
 import { loadRunJson } from "./runjson";
 import { type Stop, checkStop } from "./stops";
 
+/** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
+export const MAX_QUOTA_REQUEUES = 3;
+
 /** Work through pending chunks in file order until a stop condition (or the backlog) ends the run. */
-async function loop(ctx: Ctx, dryWorktrees: string[]): Promise<Stop> {
+export async function loop(ctx: Ctx, dryWorktrees: string[], run: typeof runChunk = runChunk): Promise<Stop> {
   const seen = new Set<string>();
+  const requeues = new Map<string, number>();
   let failures = 0;
   let lastBranch: string | null = null;
   let dryIndex = 0;
@@ -30,7 +34,19 @@ async function loop(ctx: Ctx, dryWorktrees: string[]): Promise<Stop> {
       lastBranch = (await dryRunChunk(ctx, next, dryIndex++, lastBranch, dryWorktrees)) ?? lastBranch;
       continue;
     }
-    const out = await runChunk(ctx, next, lastBranch);
+    const out = await run(ctx, next, lastBranch);
+    if (out.requeue) {
+      // quota death, not a failure; the next checkStop waits out the window. A fresh run starts a new worktree.
+      const n = (requeues.get(next.id) ?? 0) + 1;
+      requeues.set(next.id, n);
+      if (n < MAX_QUOTA_REQUEUES) {
+        seen.delete(next.id);
+        continue;
+      }
+      ctx.setStatus(next.id, "failed", `quota error ${n}x: ${out.note}`);
+      failures++;
+      continue;
+    }
     if (out.status === "failed") failures++;
     else if (out.status === "passed" || out.status === "flaky") {
       failures = 0;
@@ -69,7 +85,7 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
       stop = { reason: "preflight_failed", detail: failed.join(", ") };
       exitCode = 1;
     } else {
-      await writeOverlay(run);
+      ctx.buildProviders = (await writeOverlay(run)).buildProviders;
       stop = await loop(ctx, dryWorktrees);
     }
   } catch (e) {

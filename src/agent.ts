@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Ctx } from "./ctx";
 import { openAppend, readLines, settle, startGroup } from "./proc";
 import { parseDuration } from "./runjson";
-import { type Trip, Watchdog } from "./watchdog";
+import { QUOTA_ERROR_RE, type Trip, Watchdog } from "./watchdog";
 
 export const TICK_MS = 30_000;
 const HARD_SLACK_MS = 5 * 60_000;
@@ -14,6 +14,8 @@ export interface AgentRun {
   /** cumulative tokens for the chunk (seeded with earlier runs) */
   tokens: number;
   sessionId: string | null;
+  /** the final assistant message died on a quota / rate-limit error */
+  quotaError: string | null;
 }
 
 export type OmpMode =
@@ -82,11 +84,11 @@ export async function runOmp(
   const hardMs = Math.min(parseDuration(maxTime) + HARD_SLACK_MS, ctx.stopAtMs - t0);
   if (o.tokensUsed >= limits.tokenCap) {
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "token_cap", tokens: o.tokensUsed, detail: "cap already spent; omp not started" });
-    return { code: -1, trip: "token_cap", tokens: o.tokensUsed, sessionId: null };
+    return { code: -1, trip: "token_cap", tokens: o.tokensUsed, sessionId: null, quotaError: null };
   }
   if (hardMs <= 0) {
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "timeout", tokens: o.tokensUsed, detail: "past stop time; omp not started" });
-    return { code: -1, trip: "timeout", tokens: o.tokensUsed, sessionId: null };
+    return { code: -1, trip: "timeout", tokens: o.tokensUsed, sessionId: null, quotaError: null };
   }
   const wd = new Watchdog({
     now: t0,
@@ -139,6 +141,7 @@ export async function runOmp(
     trip = "token_cap";
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip, tokens: wd.tokens });
   }
-  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId });
-  return { code, trip, tokens: wd.tokens, sessionId: wd.sessionId };
+  const quotaError = wd.lastError !== null && QUOTA_ERROR_RE.test(wd.lastError) ? wd.lastError : null;
+  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError });
+  return { code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError };
 }

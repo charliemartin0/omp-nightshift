@@ -70,7 +70,7 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
     return 1;
   }
 
-  console.log(`overlay: ${await writeOverlay(run)}`);
+  console.log(`overlay: ${(await writeOverlay(run)).path}`);
   const checks = await runPreflight(run, {
     ledger: null,
     logFile: join(run.runDir, "logs", "preflight.log"),

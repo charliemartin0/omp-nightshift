@@ -24,6 +24,8 @@ export interface Outcome {
   /** set when the whole run must stop (e.g. quota gone after a failed gate) */
   stopReason?: string;
   stopDetail?: string;
+  /** quota death: chunk goes back to pending and is retried after the quota wait */
+  requeue?: boolean;
 }
 
 class SetupFailure extends Error {
@@ -112,13 +114,20 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
     const session = sessionId ?? newestSessionFile(sessionsDir(ctx, chunk.id));
     return session ? invoke({ kind: "resume", session, message }) : null;
   };
+  const requeue = (r: AgentRun): Outcome => ({
+    status: "pending",
+    note: `requeued: quota error: ${oneLine(r.quotaError ?? "").slice(0, 150)}`,
+    requeue: true,
+  });
   const tripped = (r: AgentRun): Outcome => fail(`watchdog ${r.trip} after ${r.tokens} tokens`);
 
   let r = await invoke({ kind: "initial", promptFile: join(ctx.prompts, `${chunk.id}.md`) });
+  if (r.quotaError) return requeue(r);
   if (r.trip === "stall") {
     const again = await resume(STALL_RESUME_MESSAGE);
     if (!again) return fail("no_session_to_resume");
     r = again;
+    if (r.quotaError) return requeue(r);
   }
   if (r.trip) return tripped(r);
   let blocked = readBlocked(wt);
@@ -128,11 +137,15 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
   let gate = await runGate(gateInput);
   if (!gate.ok) {
     const q = await checkQuota(ctx);
+    if (!q.ok && q.reason === "quota_wait") {
+      return { status: "pending", note: `requeued: gate failed, then quota_wait: ${q.detail}`, requeue: true };
+    }
     if (!q.ok) {
       return { status: "failed", note: `gate failed, then ${q.reason}: ${q.detail}`, stopReason: q.reason, stopDetail: q.detail };
     }
     const fixed = await resume(fixResumeMessage(gate.failures));
     if (!fixed) return fail("no_session_to_resume");
+    if (fixed.quotaError) return requeue(fixed);
     if (fixed.trip) return tripped(fixed);
     blocked = readBlocked(wt);
     if (blocked) return { status: "blocked", note: blocked };

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildOverlay } from "./overlay";
+import { buildChainProviders, buildOverlay } from "./overlay";
 import { spawnGroup } from "./proc";
 import type { RunJson } from "./runjson";
 
@@ -16,8 +16,8 @@ async function configEntries(repo: string, key: string): Promise<[string, unknow
   return Object.entries(value);
 }
 
-/** Build and write `<runDir>/overlay.yml` from the live global config; returns its path. */
-export async function writeOverlay(run: RunJson): Promise<string> {
+/** Build and write `<runDir>/overlay.yml` from the live global config; returns its path and the build chain's providers. */
+export async function writeOverlay(run: RunJson): Promise<{ path: string; buildProviders: string[] }> {
   const roles: Record<string, string> = {};
   for (const [k, v] of await configEntries(run.repo, "modelRoles")) if (typeof v === "string") roles[k] = v;
   const chains: Record<string, string[]> = {};
@@ -26,6 +26,6 @@ export async function writeOverlay(run: RunJson): Promise<string> {
   }
   const file = join(run.runDir, "overlay.yml");
   mkdirSync(run.runDir, { recursive: true });
-  writeFileSync(file, buildOverlay(roles, chains));
-  return file;
+  writeFileSync(file, buildOverlay(roles, chains, run.reservePct));
+  return { path: file, buildProviders: buildChainProviders(run.models.build, roles, chains) };
 }
