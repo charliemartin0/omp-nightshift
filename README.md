@@ -1,4 +1,4 @@
-# omp-overnight
+# omp-nightshift
 
 Unattended overnight agent for [omp](https://github.com/can1357/oh-my-pi). In any repo type
 `/skill:overnight <goal>`: the skill plans a backlog of small, test-proven chunks with you, then a detached
