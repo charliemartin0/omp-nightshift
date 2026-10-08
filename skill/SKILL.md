@@ -1,11 +1,11 @@
 ---
 name: overnight
-description: "Use for /skill:overnight <goal>, /skill:overnight status, /skill:overnight stop: plan a backlog of small test-proven chunks in the current repo, ask Charlie for limits, then launch the unattended omp-overnight runner as a systemd user unit."
+description: "Use for /skill:overnight <goal>, /skill:overnight status, /skill:overnight stop: plan a backlog of small test-proven chunks in the current repo, ask the user for limits, then launch the unattended omp-nightshift runner as a systemd user unit."
 ---
 
 # Overnight
 
-Plan interactively, launch detached, end the turn. CLI: `bun ~/Dev/omp-overnight/src/cli.ts` (below: `CLI`). Ask every question with the `ask` tool, one batched call per step, recommended option first. You never run `CLI run` and never do the chunk work yourself; the runner does.
+Plan interactively, launch detached, end the turn. CLI: `bun "${OMP_NIGHTSHIFT_HOME:-$HOME/.local/share/omp-nightshift}/src/cli.ts"` (below: `CLI`). Resolve this installation path before launching; if it is missing, follow the repository README installation instructions. Ask every question with the `ask` tool, one batched call per step, recommended option first. You never run `CLI run` and never do the chunk work yourself; the runner does.
 
 ## Dispatch
 
@@ -20,7 +20,7 @@ Arg is the text after `/skill:overnight`.
 
 - `repo` = `git rev-parse --show-toplevel`. `repoName` = basename with every char outside `[A-Za-z0-9-]` replaced by `-`.
 - `date` = `date +%F`. `unit` = `omp-overnight-<repoName>-<date>`.
-- Origin = `git remote get-url origin`. `forge`: `graphite` if it contains `Cloudandcompass/`; other GitHub remote -> `github` or `local`, decided in Step 3; no or other remote -> `local`. `remote` = `origin` (use the only remote if there is none named origin).
+- Origin = `git remote get-url origin`. Respect the repo's instructions for delivery: if they require Graphite, select `graphite` and treat missing authentication or repository initialization as a blocker, never fall back to another forge. Otherwise a GitHub remote -> `github` or `local`, decided in Step 3; no or other remote -> `local`. `remote` = `origin` (use the only remote if there is none named origin).
 - `trunk`: run `CLI trunk` (Graphite `.trunk` from `<git-common-dir>/.graphite_repo_config`, else `origin/HEAD` minus `origin/`, else `main`).
 - `runDir`: `<repo>/.omp/overnight/<date>/` if `git -C <repo> check-ignore -q .omp/overnight/<date>/backlog.md` succeeds, else `~/.omp/overnight/<repoName>/<date>/`. Never edit the repo's `.gitignore`.
 - `worktreeRoot` = `~/.omp/overnight/<repoName>/<date>/wt` (always outside the repo). Expand `~` to absolute paths. `mkdir -p` the run dir.
@@ -91,12 +91,12 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is `HH:MM` local,
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
 ```
 
-Use the limit defaults shown unless Charlie asked otherwise; `models.report` is `@smol`.
+Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
 
 Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, models, chunk table (id, test, status), run dir. Then run `CLI launch <runDir>/run.json`.
 
 - Preflight FAIL: show the failing checks, `ask` `Fix and retry` / `Abort`.
-- Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell Charlie the session can be closed, end the turn.
+- Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell the user the session can be closed, end the turn.
 
 ## Rules
 
