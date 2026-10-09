@@ -35,6 +35,7 @@ Produce 3-12 chunks:
 - Independent: in `independent` PR mode no chunk relies on another chunk's files.
 - Tests only, unless the goal requires production code (`prod-code: yes` only then).
 - `test` is an exact shell command, run from the repo root, that targets only that chunk's tests.
+- Optional `needs: browser, docker, dotnet` lists the tools the work will need. Set `browser` when repo or global rules require real UI smoke, Playwright MCP or screenshots for frontend changes, even if the test command does not mention a browser. Set `docker` when tests need containers and `dotnet` for .NET tests. Test-command heuristics add the obvious ones.
 
 Also pick `setupCommand` (dependency install for a fresh worktree, e.g. `npm ci`, `dotnet restore`; empty if none) and `preflightTest` (an existing passing suite or harness smoke such as `npx playwright test --list`).
 
@@ -52,6 +53,7 @@ repo: <abs repo path>
 - scope: <one line>
 - done-when: <one line>
 - test: <exact shell command, run from repo root; may be wrapped in one pair of backticks>
+- needs: browser, docker, dotnet
 - prod-code: no
 - note:
 ```
@@ -70,9 +72,12 @@ For each blocker, one batched `ask` with options: `Skip affected chunks` (recomm
 
 ## Step 3 Limits
 
+Before asking, run `CLI estimate <runDir>/backlog.md`. Put its `estimated finish ~HH:MM (p90 ~HH:MM)` line (including the displayed timezone) in the question text, and use its `safetyCap` below. Finishing early is normal; the safety cap is a limit, not a target.
+
 One batched `ask`; the first option is the recommended default.
 
-- Stop time: `07:00` / `06:00` / `08:00`.
+- Run limit: `Safety cap <safetyCap> (2× p90 estimate)` (recommended) / `Safety cap + stop at 07:00` / `Safety cap + stop at 08:00`.
+- Self-review pass after the backlog: `Off` (recommended) / `On`.
 - Max PRs: `4` / `2` / `6`.
 - Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, others >=25%` / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
 - Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
@@ -82,13 +87,13 @@ One batched `ask`; the first option is the recommended default.
 
 ## Step 4 Launch
 
-Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is `HH:MM` local, the runner resolves it to the next occurrence):
+Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `HH:MM` local override, resolved to the next occurrence; omit it for the recommended safety-cap-only option):
 
 ```json
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
   "runDir": "/abs", "worktreeRoot": "/abs", "unit": "omp-overnight-<repoName>-<date>",
   "remote": "origin", "trunk": "main", "forge": "graphite|github|local", "prMode": "independent|stack",
-  "stopAt": "HH:MM", "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
+  "safetyCap": "<from estimate>", "selfReview": false, "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
@@ -96,7 +101,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is `HH:MM` local,
 
 Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
 
-Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, reserve, models, chunk table (id, test, status), run dir. Then run `CLI launch <runDir>/run.json`.
+Show a summary: goal, forge, trunk, PR mode, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Then run `CLI launch <runDir>/run.json`.
 
 - Preflight FAIL: show the failing checks, `ask` `Fix and retry` / `Abort`.
 - Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell the user the session can be closed, end the turn.
@@ -106,3 +111,4 @@ Show a summary: goal, forge, trunk, PR mode, stop time, max PRs, floors, reserve
 - Never run `CLI run`. Never run chunk work, `gt`, `gh pr`, or push from this session.
 - Never remove worktrees, branches, or PRs.
 - A provider under its 7d floor is skipped, not fatal: the run continues on other providers in the build chain. If every chain provider is unusable, a short-window (5h) reset makes the runner wait for it; otherwise (7d floors only) the run stops.
+- Environment-blocked chunks get one automatic preflight recheck and retry per runner process; human gates do not. After fixing a remaining block, relaunch with `CLI launch <runDir>/run.json --retry-blocked` (resets every blocked chunk to pending).
