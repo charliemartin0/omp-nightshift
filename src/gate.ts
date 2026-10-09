@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Chunk } from "./backlog";
 import type { Ctx } from "./ctx";
@@ -95,6 +95,23 @@ function tail(file: string, maxChars = 2500): string {
   return lines.length > maxChars ? lines.slice(-maxChars) : lines;
 }
 
+/** Read only this invocation's appended log, retaining the full output beyond spawnGroup's capture cap. */
+function readSince(file: string, offset: number): string {
+  if (!existsSync(file)) return "";
+  const size = Math.max(0, statSync(file).size - Math.max(0, offset));
+  const fd = openSync(file, "r");
+  try {
+    const data = Buffer.alloc(size);
+    let read = 0;
+    while (read < data.length) {
+      const n = readSync(fd, data, read, data.length - read, offset + read);
+      if (n === 0) break;
+      read += n;
+    }
+    return data.toString("utf8", 0, read);
+  } finally { closeSync(fd); }
+}
+
 async function checkClean(g: GateInput): Promise<Check> {
   const r = await git(g.wt, ["status", "--porcelain"]);
   const dirty = r.stdout.split("\n").filter((l) => l && !/^\?\? \.overnight-status\/?$/.test(l));
@@ -123,9 +140,11 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
   let passes = 0;
   let lastFail = "";
   let failedLog = "";
+  let failedOffset = 0;
   let failedRun = 0;
   for (let k = 1; k <= TEST_RUNS; k++) {
     const logFile = join(ctx.logs, `${chunk.id}-test-${k}.log`);
+    const offset = existsSync(logFile) ? statSync(logFile).size : 0;
     const r = await spawnGroup(["bash", "-lc", chunk.test], {
       cwd: g.wt,
       env: { CI: "1" },
@@ -135,12 +154,13 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
     if (r.code === 0 && !r.timedOut) passes++;
     else {
       failedLog = logFile;
+      failedOffset = offset;
       failedRun = k;
       lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
     }
   }
   if (passes === TEST_RUNS) return { ok: true, passes, detail: `tests ${passes}/${TEST_RUNS}` };
-  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readFileSync(failedLog, "utf8")), failedRun };
+  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readSince(failedLog, failedOffset)), failedRun };
   return { ok: false, passes, detail: `tests ${passes}/${TEST_RUNS} (${chunk.test})\n${lastFail}` };
 }
 

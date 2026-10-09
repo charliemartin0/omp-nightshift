@@ -67,8 +67,8 @@ export function historyFromLedgers(ledgers: LedgerEntry[][]): History {
         closeWait(at);
       } else if (e.event === "chunk_end" && e.chunk) {
         const start = starts.get(e.chunk);
-        if (start === undefined || NOT_A_RUN.includes(String(e.status))) continue;
         starts.delete(e.chunk);
+        if (start === undefined || NOT_A_RUN.includes(String(e.status))) continue;
         (h.durations[chunkType(e.chunk)] ??= []).push(at - start);
         h.chunks++;
       } else if (e.event === "quota_wait") {

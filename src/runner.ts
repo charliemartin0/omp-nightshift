@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Need, chunkNeeds, parseBacklog } from "./backlog";
 import { isEnvNote, runChunk } from "./chunk";
-import { type Ctx, makeCtx } from "./ctx";
+import { type Ctx, deadline, makeCtx } from "./ctx";
 import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
@@ -12,7 +12,7 @@ import { errMsg, shutdown } from "./proc";
 import { writeReport } from "./report";
 import { selfReview } from "./review";
 import { loadRunJson } from "./runjson";
-import { type Stop, checkStop, IDENTICAL_FAILURE_LIMIT } from "./stops";
+import { type Stop, checkStop, IDENTICAL_FAILURE_LIMIT, STOP_MARGIN_MS } from "./stops";
 
 /** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
 export const MAX_QUOTA_REQUEUES = 3;
@@ -31,8 +31,8 @@ export async function loop(
   run: typeof runChunk = runChunk,
   recheck: (needs: Need[]) => Promise<Check[]> = (needs) => {
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
-    const { dotnetTarget } = preflightRequirements(chunks.map((c) => ({ ...c, status: "pending" })));
-    return runPreflight(ctx.run, { ledger: ctx.ledger, logFile: join(ctx.logs, "preflight.log"), needs, recheck: true, dotnetTarget });
+    const { dotnetTarget, dotnetCwd } = preflightRequirements(chunks.map((c) => ({ ...c, status: "pending" })));
+    return runPreflight(ctx.run, { ledger: ctx.ledger, logFile: join(ctx.logs, "preflight.log"), needs, recheck: true, dotnetTarget, dotnetCwd, deadlineAtMs: deadline(ctx).atMs - STOP_MARGIN_MS, clock: ctx.clock });
   },
 ): Promise<Stop> {
   const seen = new Set<string>();
@@ -49,11 +49,16 @@ export async function loop(
       if (ctx.dryRun) return { reason: "finished" };
       const candidates = chunks.filter((c) => c.status === "blocked" && isEnvNote(c.note) && !envRetried.has(c.id));
       if (!candidates.length) return { reason: "finished" };
+      const stop = await checkStop(ctx, chunks, failures);
+      if (stop) return stop;
       for (const c of candidates) envRetried.add(c.id);
       const checks = await recheck([...new Set(candidates.flatMap(chunkNeeds))]);
       const failed = checks.filter((c) => !c.ok);
       const retried = failed.some((c) => !c.need) ? [] : candidates.filter((c) => !failed.some((x) => x.need && chunkNeeds(c).includes(x.need)));
       ctx.ledger.log("env_retry", { chunks: candidates.map((c) => c.id), retried: retried.map((c) => c.id), ok: failed.length === 0, failed: failed.map((c) => c.name) });
+      const d = deadline(ctx);
+      const left = d.atMs - ctx.clock.now();
+      if (left <= STOP_MARGIN_MS) return { reason: d.reason, detail: `${Math.round(left / 60_000)} min to ${new Date(d.atMs).toISOString()}` };
       for (const c of retried) {
         ctx.setStatus(c.id, "pending", `env retry: ${c.note}`);
         seen.delete(c.id);

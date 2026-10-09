@@ -59,3 +59,35 @@ test("classifies the evidence environment block without reclassifying product de
   expect(classifyBlocked("ENV: docker socket denied")).toBe("env: docker socket denied");
   expect(classifyBlocked("ambiguous product decision")).toBe("ambiguous product decision");
 });
+
+test("environment recheck never starts within the safety cap or stopAt margin", async () => {
+  for (const override of [false, true]) {
+    const { ctx, state } = setup();
+    backlog(ctx, [{ id: "a", status: "blocked", note: "env: browser missing", needs: "browser" }]);
+    if (override) ctx.stopAtMs = state.t + 10 * 60_000;
+    else ctx.capAtMs = state.t + 10 * 60_000;
+    let rechecks = 0;
+    const stop = await loop(ctx, [], undefined, async () => { rechecks++; return []; });
+    expect(rechecks).toBe(0);
+    expect(stop.reason).toBe(override ? "stopAt" : "safety_cap");
+  }
+});
+
+test("deadline reached during an unsuccessful environment recheck is not finished", async () => {
+  const { ctx, state } = setup();
+  backlog(ctx, [{ id: "a", status: "blocked", note: "env: browser missing", needs: "browser" }]);
+  ctx.capAtMs = state.t + 25 * 60_000;
+  const stop = await loop(ctx, [], undefined, async () => {
+    state.t += 6 * 60_000;
+    return [{ name: "browser", need: "browser", ok: false, detail: "deadline reached" }];
+  });
+  expect(stop.reason).toBe("safety_cap");
+});
+
+test("a normally exhausted backlog still finishes without environment checks at the deadline", async () => {
+  const { ctx, state } = setup();
+  backlog(ctx, [{ id: "a", status: "passed" }]);
+  ctx.capAtMs = state.t;
+  const stop = await loop(ctx, [], undefined, async () => { throw new Error("must not recheck"); });
+  expect(stop.reason).toBe("finished");
+});

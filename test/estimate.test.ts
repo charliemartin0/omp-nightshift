@@ -53,6 +53,20 @@ test("ignores non-outcomes and closes waits on run/start/stop/healthy quota", ()
   expect(h.chunks).toBe(0);
   expect(h.waitMs).toBe(4 * MIN);
 });
+test("quota-requeued and stopped attempts cannot be paired with a later setup block", () => {
+  for (const status of ["pending", "dry_run", "stopped"]) {
+    const h = historyFromLedgers([[
+      entry(0, "chunk_start", { chunk: "fe-a" }),
+      entry(MIN, "chunk_end", { chunk: "fe-a", status }),
+      entry(2 * MIN, "quota_wait"),
+      entry(122 * MIN, "quota", { ok: true }),
+      entry(123 * MIN, "chunk_end", { chunk: "fe-a", status: "blocked" }),
+    ]]);
+    expect(h.durations).toEqual({});
+    expect(h.chunks).toBe(0);
+    expect(h.waitMs).toBe(120 * MIN);
+  }
+});
 test("history walks exactly two levels, excludes dry-run, deduplicates realpaths", () => {
   const root = mkdtempSync(join(tmpdir(), "estimate-"));
   try {

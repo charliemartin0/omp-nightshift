@@ -107,6 +107,7 @@ for pending chunks that need them: `docker ps`, a real Chrome/Chromium headless 
 Playwright MCP initialize/navigate call, and `dotnet restore` in the same worktree after the baseline passes.
 Restore uses the repository's own NuGetAudit settings; when `setupCommand` already includes
 `dotnet restore`, that global setup/baseline covers it instead. No NuGetAudit overrides are added.
+Conventional `cd <directory> && dotnet test <target>` commands retain their working directory for restore.
 
 An optional backlog line `- needs: browser, docker, dotnet` declares requirements. Test commands
 mentioning dotnet, Docker/TestContainers or Playwright/Cypress infer the obvious needs. Frontend work
@@ -114,6 +115,8 @@ whose rules require UI smoke/screenshots must explicitly declare `browser` when 
 not mention it. A need-scoped failure blocks only affected pending chunks, with an `env: preflight …`
 note. Each failing need check gets one retry after 15 s; no browsers are installed, permissions changed,
 services configured or MCP config edited. Environment rechecks skip power/git-clean checks.
+Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
+by the remaining deadline.
 
 ## Blocked chunks
 
@@ -140,6 +143,7 @@ One invalid attempt gets a smaller facts-only retry; if both fail, a determinist
 states, failed/blocked chunks, quota waits and stop details. Flaky test names/messages, per-chunk
 runtime/tokens and launch totals are always added by the runner, along with any self-review findings.
 The flaky gate also annotates the draft PR body best-effort without changing the gate result.
+Flaky attribution reads only the current test invocation's appended log, not failures from earlier attempts.
 
 The report event records `attempts`: 0 for deterministic dry runs, 1/2 for a valid model attempt, 3 for
 fallback. Existing reports are renamed to `.bak` before generation (replacing an older backup), including
