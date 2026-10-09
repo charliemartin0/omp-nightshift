@@ -10,6 +10,7 @@ import { writeOverlay } from "./overlayfile";
 import { type Check, chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
 import { writeReport } from "./report";
+import { selfReview } from "./review";
 import { loadRunJson } from "./runjson";
 import { type Stop, checkStop, IDENTICAL_FAILURE_LIMIT } from "./stops";
 
@@ -154,6 +155,7 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
     for (const wt of dryWorktrees) await removeWorktree(run.repo, wt);
   }
   ledger.log("stop", { ...stop });
+  if (run.selfReview && !ctx.dryRun && (stop.reason === "finished" || stop.reason === "max_prs")) await selfReview(ctx);
   await writeReport(ctx);
   return exitCode;
 }

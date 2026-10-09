@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseBacklog } from "../src/backlog";
 import { readLedger, type LedgerEntry } from "../src/ledger";
@@ -33,6 +33,10 @@ function fixture() {
   add("14:08", "gate", gate("fe-plans", 7006, true));
   add("14:08", "chunk_end", { chunk: "fe-plans", status: "flaky" });
   add("14:10", "stop", { reason: "finished" });
+  const review = join(ctx.run.runDir, "reviews", "fe-plans.md");
+  mkdirSync(join(ctx.run.runDir, "reviews"), { recursive: true });
+  writeFileSync(review, "- P2: Add a test for the timeout edge case.\n");
+  add("14:11", "self_review", { chunk: "fe-plans", pr: 7006, ok: true, path: review });
   writeFileSync(ctx.ledger.file, ledger.map((e) => JSON.stringify(e)).join("\n") + "\n");
   backlog(ctx, [{ id: "fe-shell", status: "passed", note: "PR #6971" }, { id: "fe-plans", status: "flaky", note: "PR #7006" }, { id: "fe-x", status: "blocked", note: "env: preflight browser: no Chrome/Chromium found" }]);
   const path = join(ctx.run.runDir, "report.md");
@@ -53,6 +57,8 @@ test("two bad heading attempts fall back with blocked top, PR states, flaky name
   expect(result.attempts).toBe(3);
   expect(md.startsWith("## Blocked")).toBe(true);
   for (const s of ["--retry-blocked", "PR #6971 https://example.test/pr/6971 (draft)", "PlansTab > shows live inventory", "Quota wait: anthropic 5h", "(2h53m)", "## Run stats", "| fe-plans | flaky | 14m | 300,000 |", "Total runtime: 4h13m over 2 launch(es)"]) expect(md).toContain(s);
+  expect(md).toContain("## Self-review");
+  expect(md).toContain("### fe-plans (PR #7006)");
   expect(entries(ctx).some((e) => e.event === "report_fallback")).toBe(true);
   expect(entries(ctx).findLast((e) => e.event === "report")?.attempts).toBe(3);
 });
@@ -70,7 +76,8 @@ test("compact second attempt passes without fallback and still gets the factual 
   expect(result.attempts).toBe(2);
   expect(md.startsWith("## Blocked")).toBe(true);
   expect(md).toContain("## Flaky tests");
-  expect(md.trimEnd().endsWith("| fe-x | blocked | 0m | 0 |")).toBe(true);
+  expect(md).toContain("| fe-x | blocked | 0m | 0 |");
+  expect(md.trimEnd().endsWith("- P2: Add a test for the timeout edge case.")).toBe(true);
   expect(entries(ctx).some((e) => e.event === "report_fallback")).toBe(false);
 });
 test("pre-existing report is backed up before a first-attempt success", async () => {
