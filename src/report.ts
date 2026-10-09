@@ -47,7 +47,7 @@ function flakyTests(v: unknown): FlakyTest[] {
 export function reportFacts(ctx: Ctx, entries: LedgerEntry[], chunks: Chunk[]): Facts {
   const current = entries.slice(Math.max(0, entries.findLastIndex((e) => e.event === "run_start")));
   const latestOk = new Map<string, LedgerEntry>();
-  const latestGate = new Map<string, LedgerEntry>();
+  const latestFlaky = new Map<string, LedgerEntry>();
   const attempts = new Map<string, { fromMs: number; tokens: number }>();
   const stats = new Map<string, { runtimeMs: number; tokens: number }>();
   const waits: QuotaWait[] = [];
@@ -78,7 +78,7 @@ export function reportFacts(ctx: Ctx, entries: LedgerEntry[], chunks: Chunk[]): 
     if (e.event === "chunk_start") {
       attempts.set(e.chunk, { fromMs: at, tokens: 0 });
       latestOk.delete(e.chunk);
-      latestGate.delete(e.chunk);
+      latestFlaky.delete(e.chunk);
     } else if (e.event === "omp_exit") {
       const attempt = attempts.get(e.chunk);
       if (attempt && typeof e.tokens === "number") attempt.tokens = Math.max(attempt.tokens, e.tokens);
@@ -92,7 +92,7 @@ export function reportFacts(ctx: Ctx, entries: LedgerEntry[], chunks: Chunk[]): 
         attempts.delete(e.chunk);
       }
     } else if (e.event === "gate") {
-      latestGate.set(e.chunk, e);
+      if (e.flaky === true) latestFlaky.set(e.chunk, e);
       if (e.ok === true) latestOk.set(e.chunk, e);
     }
   }
@@ -115,7 +115,7 @@ export function reportFacts(ctx: Ctx, entries: LedgerEntry[], chunks: Chunk[]): 
     chunks: chunks.map((c) => ({ id: c.id, status: c.status, note: c.note, ...(stats.get(c.id) ?? { runtimeMs: 0, tokens: 0 }) })),
     prs,
     flaky: chunks.flatMap((c) => {
-      const gate = latestGate.get(c.id);
+      const gate = latestFlaky.get(c.id);
       return gate?.flaky === true ? [{ chunk: c.id, tests: flakyTests(gate.flakyTests) }] : [];
     }),
     blocked: chunks.filter((c) => c.status === "blocked").map((c) => ({ id: c.id, note: c.note })),

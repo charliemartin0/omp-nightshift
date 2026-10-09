@@ -109,3 +109,13 @@ test("facts track latest attempt, current statuses, full-history token maxima an
   expect(facts.prs).toHaveLength(2);
   expect(renderBody(facts, true, "")).toContain("See ## Blocked above.");
 });
+
+test("facts retain the latest flaky gate within an attempt, but not from a superseded attempt", () => {
+  const { ctx } = fixture();
+  const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
+  const all = readLedger(ctx.ledger.file);
+  all.push({ ts: "2026-10-09T14:12:00Z", event: "gate", chunk: "fe-plans", ok: true, flaky: false });
+  expect(reportFacts(ctx, all, chunks).flaky[0].tests[0].name).toBe("PlansTab > shows live inventory");
+  all.push({ ts: "2026-10-09T14:13:00Z", event: "chunk_start", chunk: "fe-plans" });
+  expect(reportFacts(ctx, all, chunks).flaky).toEqual([]);
+});
