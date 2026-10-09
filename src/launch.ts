@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseBacklog } from "./backlog";
 import { writeOverlay } from "./overlayfile";
-import { runPreflight } from "./preflight";
+import { chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { type SpawnResult, sleep, spawnGroup } from "./proc";
 import { type RunJson, loadRunJson } from "./runjson";
 
@@ -59,7 +59,7 @@ async function startAndVerify(argv: string[], unit: string): Promise<{ ok: boole
 export async function launch(runJsonPath: string, dryRun: boolean, cliPath: string): Promise<number> {
   const runJson = resolve(runJsonPath);
   const run = loadRunJson(runJson);
-  parseBacklog(readFileSync(join(run.runDir, "backlog.md"), "utf8")); // fail fast on a bad backlog
+  const chunks = parseBacklog(readFileSync(join(run.runDir, "backlog.md"), "utf8")).chunks; // fail fast on a bad backlog
 
   // Lock first: a second launch must not run its preflight (which recreates <worktreeRoot>/_preflight)
   // while another run owns this repo.
@@ -74,9 +74,15 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
   const checks = await runPreflight(run, {
     ledger: null,
     logFile: join(run.runDir, "logs", "preflight.log"),
-    onResult: (c) => console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`),
+    ...preflightRequirements(chunks),
+    onResult: (c) => {
+      if (!c.ok && c.need) {
+        const ids = chunksBlockedBy(chunks, [c]).map((b) => b.id);
+        console.log(`WARN ${c.name}: ${c.detail} — chunks needing ${c.need} will be blocked: ${ids.join(", ")}`);
+      } else console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`);
+    },
   });
-  if (checks.some((c) => !c.ok)) return 1;
+  if (checks.some((c) => !c.ok && !c.need)) return 1;
 
   let res = await startAndVerify(systemdRunArgv(run, lock, "sleep:idle:handle-lid-switch", runJson, cliPath, dryRun), run.unit);
   if (!res.ok && res.denied) {

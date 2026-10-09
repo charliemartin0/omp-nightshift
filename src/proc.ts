@@ -2,6 +2,7 @@
 // process group and timeouts/signals reach grandchildren via process.kill(-pid, ...).
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import type { FileSink } from "bun";
 
 export const GRACE_MS = 15_000;
 const OUTPUT_CAP = 4_000_000;
@@ -24,6 +25,7 @@ export interface Group {
   pid: number;
   stdout: ReadableStream<Uint8Array>;
   stderr: ReadableStream<Uint8Array>;
+  stdin: FileSink | null;
   /** Exit code. After shutdown() this never resolves, parking the caller until the signal handler exits. */
   exited: Promise<number>;
   /** SIGTERM the group, wait up to GRACE_MS for the leader, then SIGKILL the group. */
@@ -51,12 +53,12 @@ async function terminate(pid: number, raw: Promise<number>, alive: () => boolean
   await raw;
 }
 
-export function startGroup(argv: string[], o: { cwd?: string; env?: Record<string, string> } = {}): Group {
+export function startGroup(argv: string[], o: { cwd?: string; env?: Record<string, string>; stdin?: "pipe" } = {}): Group {
   if (shuttingDown) throw new Error("runner is shutting down");
   const proc = Bun.spawn(["setsid", ...argv], {
     cwd: o.cwd,
     env: { ...process.env, ...o.env },
-    stdin: "ignore",
+    stdin: o.stdin ?? "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -72,6 +74,7 @@ export function startGroup(argv: string[], o: { cwd?: string; env?: Record<strin
     pid,
     stdout: proc.stdout as ReadableStream<Uint8Array>,
     stderr: proc.stderr as ReadableStream<Uint8Array>,
+    stdin: o.stdin === "pipe" ? proc.stdin as FileSink : null,
     exited: raw.then((code) => (shuttingDown ? new Promise<number>(() => {}) : code)),
     kill: () => terminate(pid, raw, () => alive),
   };

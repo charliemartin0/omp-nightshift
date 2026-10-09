@@ -7,7 +7,7 @@ import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
 import { writeOverlay } from "./overlayfile";
-import { runPreflight } from "./preflight";
+import { chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
 import { writeReport } from "./report";
 import { loadRunJson } from "./runjson";
@@ -103,13 +103,18 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
   let stop: Stop = { reason: "finished" };
   let exitCode = 0;
   try {
-    const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log") });
+    const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
+    const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log"), ...preflightRequirements(chunks) });
     logEstimate(ctx);
-    const failed = checks.filter((c) => !c.ok).map((c) => c.name);
+    const failed = checks.filter((c) => !c.ok && !c.need).map((c) => c.name);
     if (failed.length) {
       stop = { reason: "preflight_failed", detail: failed.join(", ") };
       exitCode = 1;
     } else {
+      for (const blocked of chunksBlockedBy(chunks, checks)) {
+        ctx.setStatus(blocked.id, "blocked", blocked.note);
+        ledger.log("chunk_end", { chunk: blocked.id, status: "blocked", note: blocked.note, changedFiles: [], preflight: true });
+      }
       ctx.buildProviders = (await writeOverlay(run)).buildProviders;
       stop = await loop(ctx, dryWorktrees);
     }
