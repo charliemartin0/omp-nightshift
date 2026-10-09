@@ -1,0 +1,15 @@
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:00:10.46]     Acme.Platform.IntegrationTests.Handlers.Orders.OrdersHealthTransitionRecorderTests.RecordSnapshots_persists_transition_on_state_change_and_skips_duplicates [FAIL]
+  Failed Acme.Platform.IntegrationTests.Handlers.Orders.OrdersHealthTransitionRecorderTests.RecordSnapshots_persists_transition_on_state_change_and_skips_duplicates [976 ms]
+  Error Message:
+   Acme.Platform.Domain.Exceptions.DomainArgumentException : Modified date cannot be earlier than created date. (Parameter: 'modifiedAt')
+  Stack Trace:
+     at Acme.Platform.Domain.Shared.ValueObjects.AuditTimestamps.Create(DateTimeOffset createdAt, DateTimeOffset modifiedAt) in /wt/Backend/src/Acme.Platform.Domain/Shared/ValueObjects/AuditTimestamps.cs:line 34
+   at Acme.Platform.Domain.Shared.ValueObjects.AuditTimestamps.UpdateModifiedAt(DateTimeOffset modifiedAt) in /wt/Backend/src/Acme.Platform.Domain/Shared/ValueObjects/AuditTimestamps.cs:line 63
+   at Acme.Platform.Domain.Entities.Orders.OrdersHealthDeviceLastKnownState.UpdateSnapshot(String tenantId, String tenantName, String deviceIdentifier, String effectiveState, DateTimeOffset evaluatedAtUtc, Nullable`1 lastPollingSeenUtc, Nullable`1 lastHeartbeatSeenUtc, Boolean pollingSourceAvailable, Boolean heartbeatSourceAvailable) in /wt/Backend/src/Acme.Platform.Domain/Entities/Orders/OrdersHealthDeviceLastKnownState.cs:line 114
+   at Acme.Platform.Application.Features.Orders.Health.OrdersHealthTransitionRecorder.RecordSnapshotsAsync(IReadOnlyList`1 snapshots, CancellationToken cancellationToken) in /wt/Backend/src/Acme.Platform.Application/Features/Orders/Health/OrdersHealthTransitionRecorder.cs:line 101
+   at Acme.Platform.IntegrationTests.Handlers.Orders.OrdersHealthTransitionRecorderTests.RecordSnapshots_persists_transition_on_state_change_and_skips_duplicates() in /wt/Backend/tests/Acme.Platform.IntegrationTests/Handlers/Orders/OrdersHealthTransitionTests.cs:line 47
+   at Acme.Platform.IntegrationTests.Handlers.Orders.OrdersHealthTransitionRecorderTests.RecordSnapshots_persists_transition_on_state_change_and_skips_duplicates() in /wt/Backend/tests/Acme.Platform.IntegrationTests/Handlers/Orders/OrdersHealthTransitionTests.cs:line 55
+--- End of stack trace from previous location ---
+
+Failed!  - Failed:     1, Passed:    63, Skipped:     0, Total:    64, Duration: 1 s - Acme.Platform.IntegrationTests.dll (net10.0)

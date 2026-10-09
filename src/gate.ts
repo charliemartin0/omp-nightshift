@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Chunk } from "./backlog";
 import type { Ctx } from "./ctx";
@@ -6,6 +6,44 @@ import { git } from "./git";
 import { spawnGroup } from "./proc";
 
 export const TEST_RUNS = 3;
+
+export interface FlakyTest { name: string; message: string }
+
+/** Failed test names/messages from vitest, dotnet/xUnit and jest; bounded and deduplicated by name. */
+export function parseFailedTests(log: string): FlakyTest[] {
+  const lines = log.split("\n");
+  const tests: FlakyTest[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length && tests.length < 10; i++) {
+    const vitest = /^\s*FAIL\s+(.+)$/.exec(lines[i]);
+    const dotnet = /^\s*Failed\s+(\S+)\s+\[/.exec(lines[i]);
+    const jest = /^\s*●\s+(.+)$/.exec(lines[i]);
+    const match = vitest ?? dotnet ?? jest;
+    if (!match || (jest && jest[1].startsWith("Console"))) continue;
+    const name = match[1].replace(/\s+/g, " ").trim();
+    if (seen.has(name)) continue;
+    let from = i + 1;
+    if (dotnet) {
+      const error = lines.findIndex((l, j) => j > i && /^\s*Error Message:/.test(l));
+      from = error >= 0 ? error + 1 : lines.length;
+    }
+    const message = lines.slice(from).find((l) => l.trim())?.trim().slice(0, 300) ?? "";
+    tests.push({ name, message });
+    seen.add(name);
+  }
+  return tests.length ? tests : [{ name: "(unparsed)", message: lines.findLast((l) => l.trim())?.trim().slice(0, 300) ?? "" }];
+}
+
+/** Replace the gate-owned section without disturbing subsequent PR sections. */
+export function withFlakySection(body: string, tests: FlakyTest[], failedRun: number): string {
+  const lines = body.split("\n");
+  const start = lines.findIndex((l) => l === "## Flaky tests");
+  if (start >= 0) {
+    const next = lines.findIndex((l, i) => i > start && l.startsWith("## "));
+    lines.splice(start, (next < 0 ? lines.length : next) - start);
+  }
+  return `${lines.join("\n").trimEnd()}\n\n## Flaky tests\n\nThe overnight gate ran the chunk test 3 times; run ${failedRun} failed.\n\n${tests.map((t) => `- \`${t.name}\`: ${t.message}`).join("\n")}\n`;
+}
 
 export interface GateInput {
   ctx: Ctx;
@@ -80,10 +118,12 @@ async function checkCommit(g: GateInput): Promise<Check> {
 }
 
 /** Three runs of the chunk's test command: 3/3 pass, 2/3 pass flaky, else fail. */
-async function checkTests(g: GateInput): Promise<Check & { passes: number }> {
+async function checkTests(g: GateInput): Promise<Check & { passes: number; flakyTests?: FlakyTest[]; failedRun?: number }> {
   const { ctx, chunk } = g;
   let passes = 0;
   let lastFail = "";
+  let failedLog = "";
+  let failedRun = 0;
   for (let k = 1; k <= TEST_RUNS; k++) {
     const logFile = join(ctx.logs, `${chunk.id}-test-${k}.log`);
     const r = await spawnGroup(["bash", "-lc", chunk.test], {
@@ -93,10 +133,14 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number }> {
       logFile,
     });
     if (r.code === 0 && !r.timedOut) passes++;
-    else lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
+    else {
+      failedLog = logFile;
+      failedRun = k;
+      lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
+    }
   }
   if (passes === TEST_RUNS) return { ok: true, passes, detail: `tests ${passes}/${TEST_RUNS}` };
-  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}` };
+  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readFileSync(failedLog, "utf8")), failedRun };
   return { ok: false, passes, detail: `tests ${passes}/${TEST_RUNS} (${chunk.test})\n${lastFail}` };
 }
 
@@ -145,10 +189,23 @@ export async function runGate(g: GateInput): Promise<GateResult> {
   const failures = Object.values(checks).filter((c) => !c.ok).map((c) => c.detail);
   const flaky = tests.ok && tests.passes < TEST_RUNS;
   const ok = failures.length === 0;
+  let prBodyUpdated: boolean | undefined;
+  if (ok && flaky && pr?.pr && tests.flakyTests && tests.failedRun) {
+    prBodyUpdated = false;
+    try {
+      const viewed = await spawnGroup(["gh", "pr", "view", String(pr.pr.number), "--repo", g.slug, "--json", "body", "-q", ".body"], { cwd: g.wt, timeoutMs: 60_000 });
+      if (viewed.code === 0 && !viewed.timedOut) {
+        const file = join(g.ctx.logs, `${g.chunk.id}-pr-body.md`);
+        writeFileSync(file, withFlakySection(viewed.stdout, tests.flakyTests, tests.failedRun));
+        const edited = await spawnGroup(["gh", "pr", "edit", String(pr.pr.number), "--repo", g.slug, "--body-file", file], { cwd: g.wt, timeoutMs: 60_000 });
+        prBodyUpdated = edited.code === 0 && !edited.timedOut;
+      }
+    } catch { /* PR body annotation is best-effort, not a gate failure. */ }
+  }
   const head = (await git(g.wt, ["rev-parse", "--short=7", "HEAD"])).stdout.trim();
   const where = pr?.pr ? `PR #${pr.pr.number} ${pr.pr.url}` : `branch ${g.branch} @ ${head}`;
   const extras = [flaky ? `flaky ${tests.passes}/${TEST_RUNS}` : "", pr?.redrafted ? "redrafted" : ""].filter(Boolean);
   const note = extras.length ? `${where} (${extras.join(", ")})` : where;
-  g.ctx.ledger.log("gate", { chunk: g.chunk.id, ok, flaky, checks });
+  g.ctx.ledger.log("gate", { chunk: g.chunk.id, ok, flaky, checks, ...(tests.flakyTests ? { flakyTests: tests.flakyTests } : {}), ...(prBodyUpdated !== undefined ? { prBodyUpdated } : {}) });
   return { ok, flaky, failures, note };
 }

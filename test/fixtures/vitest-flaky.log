@@ -1,0 +1,27 @@
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL   platform-admin  apps/platform-admin/src/screens/PlanWizardScreen.test.tsx > PlanWizardScreen > saves a brand by group id and a place with its centre
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ apps/platform-admin/src/screens/PlanWizardScreen.test.tsx:423:3
+    421|   });
+    422| 
+    423|   it('saves a brand by group id and a place with its centre', async ()…
+       |   ^
+    424|     const placeRadius = placeRadiusFromBounds(-1.25, 52.9, -1.05, 53);
+    425|     renderWizard();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL   platform-admin  apps/platform-admin/src/screens/PlansTab.test.tsx > PlansTab > shows live inventory and truncation notice in the public read-only Plan view
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ apps/platform-admin/src/screens/PlansTab.test.tsx:612:3
+    610|   });
+    611| 
+    612|   it('shows live inventory and truncation notice in the public read-on…
+       |   ^
+    613|     publicPlanShareQuery.isSuccess = true;
+    614|     publicPlanShareQuery.isFetchedAfterMount = true;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
