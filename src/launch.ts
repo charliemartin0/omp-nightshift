@@ -83,6 +83,11 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
     await sh(["systemctl", "--user", "reset-failed", run.unit]);
     console.log(LID_WARNING);
     res = await startAndVerify(systemdRunArgv(run, lock, "sleep:idle", runJson, cliPath, dryRun), run.unit);
+    if (!res.ok && res.denied) {
+      await sh(["systemctl", "--user", "reset-failed", run.unit]);
+      console.log("WARNING: polkit denied the sleep inhibitor; holding an idle-only inhibitor (keep the host awake)");
+      res = await startAndVerify(systemdRunArgv(run, lock, "idle", runJson, cliPath, dryRun), run.unit);
+    }
   }
   if (!res.ok) {
     console.error(res.message);
