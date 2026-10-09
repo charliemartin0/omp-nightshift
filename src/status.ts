@@ -6,6 +6,7 @@ import { git, gitOut } from "./git";
 import { type LedgerEntry, readLedger, summarize } from "./ledger";
 import { errMsg, spawnGroup } from "./proc";
 import { type RunJson, validateRunJson } from "./runjson";
+import { bst } from "./stops";
 
 const subdirs = (dir: string): string[] =>
   existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => join(dir, e.name)) : [];
@@ -50,6 +51,14 @@ export async function statusText(repo: string): Promise<string> {
   const run = findLatestRun(repo);
   if (!run) return `no overnight run found for ${repo}`;
   const out: string[] = [`repo: ${run.repo}`, `run: ${run.runDir} (${run.date})`, `unit: ${run.unit}: ${await unitState(run.unit)}`];
+  const ledgerFile = newest([join(run.runDir, "ledger.jsonl"), join(run.runDir, "ledger.dry-run.jsonl")]);
+  const entries = ledgerFile ? readLedger(ledgerFile) : [];
+  const segment = entries.slice(Math.max(0, entries.findLastIndex((e) => e.event === "run_start")));
+  const stop = segment.findLast((e) => e.event === "stop");
+  if (stop) out.push(`stop: ${stop.reason}${stop.detail ? ` (${stop.detail})` : ""}`);
+  const e = segment.findLast((e) => e.event === "estimate");
+  const start = segment.find((e) => e.event === "run_start");
+  out.push(e ? `estimate: finish ~${bst(Date.parse(String(e.finishAt)))} (p90 ~${bst(Date.parse(String(e.p90At)))}), ${e.remaining} chunk(s) left · safety cap ${bst(Date.parse(String(e.capAt)))}${start?.stopAt ? ` · stopAt ${bst(Date.parse(String(start.stopAt)))}` : ""}` : "estimate: none yet");
 
   try {
     const chunks = parseBacklog(readFileSync(join(run.runDir, "backlog.md"), "utf8")).chunks;
@@ -60,9 +69,8 @@ export async function statusText(repo: string): Promise<string> {
     out.push("", `backlog unreadable: ${errMsg(e)}`);
   }
 
-  const ledgerFile = newest([join(run.runDir, "ledger.jsonl"), join(run.runDir, "ledger.dry-run.jsonl")]);
   if (ledgerFile) {
-    const tail: LedgerEntry[] = readLedger(ledgerFile).slice(-15);
+    const tail: LedgerEntry[] = entries.slice(-15);
     out.push("", `ledger (last ${tail.length}, ${ledgerFile}):`, ...tail.map((e) => `  ${summarize(e)}`));
   }
 

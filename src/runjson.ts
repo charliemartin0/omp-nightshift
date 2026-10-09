@@ -23,7 +23,9 @@ export interface RunJson {
   trunk: string;
   forge: Forge;
   prMode: "independent" | "stack";
-  stopAt: string;
+  stopAt?: string;
+  safetyCap?: string;
+  selfReview: boolean;
   maxPrs: number;
   floors: Record<string, number>;
   /** omp's `retry.usageReservePct` for the run overlay (percent left below which omp switches models) */
@@ -46,9 +48,9 @@ export const LIMIT_DEFAULTS: Limits = {
 
 const TOP_KEYS = [
   "version", "repo", "repoName", "date", "goal", "runDir", "worktreeRoot", "unit", "remote", "trunk", "forge",
-  "prMode", "stopAt", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
+  "prMode", "stopAt", "safetyCap", "selfReview", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
 ];
-const OPTIONAL_KEYS = ["reservePct"];
+const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview"];
 const MODEL_KEYS = ["plan", "build", "report"];
 
 export function sanitizeRepoName(name: string): string {
@@ -127,6 +129,8 @@ export function validateRunJson(x: unknown): RunJson {
   num(l.stallMinutes, "limits.stallMinutes", 1);
   num(l.tokenCap, "limits.tokenCap", 1, Infinity, true);
   num(l.testTimeoutMinutes, "limits.testTimeoutMinutes", 1);
+  if (o.safetyCap !== undefined) parseDuration(str(o, "safetyCap"));
+  if (o.selfReview !== undefined && typeof o.selfReview !== "boolean") throw new Error("run.json: selfReview must be boolean");
 
   return {
     version: 1,
@@ -141,7 +145,9 @@ export function validateRunJson(x: unknown): RunJson {
     trunk: str(o, "trunk", /^[A-Za-z0-9._/-]+$/),
     forge,
     prMode,
-    stopAt: str(o, "stopAt", /^([01]\d|2[0-3]):[0-5]\d$/),
+    stopAt: o.stopAt === undefined ? undefined : str(o, "stopAt", /^([01]\d|2[0-3]):[0-5]\d$/),
+    safetyCap: o.safetyCap === undefined ? undefined : str(o, "safetyCap"),
+    selfReview: o.selfReview === undefined ? false : o.selfReview as boolean,
     maxPrs: num(o.maxPrs, "maxPrs", 1, Infinity, true),
     floors,
     reservePct: o.reservePct === undefined ? RESERVE_PCT_DEFAULT : num(o.reservePct, "reservePct", 0, 99, true),

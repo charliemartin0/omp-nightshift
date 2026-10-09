@@ -4,37 +4,50 @@ import { parseBacklog } from "./backlog";
 import { runChunk } from "./chunk";
 import { type Ctx, makeCtx } from "./ctx";
 import { dryRunChunk } from "./dryrun";
+import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
 import { writeOverlay } from "./overlayfile";
 import { runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
 import { writeReport } from "./report";
 import { loadRunJson } from "./runjson";
-import { type Stop, checkStop } from "./stops";
+import { type Stop, checkStop, IDENTICAL_FAILURE_LIMIT } from "./stops";
 
 /** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
 export const MAX_QUOTA_REQUEUES = 3;
+
+/** Refresh the finish estimate while keeping the launch's fixed safety cap. */
+export function logEstimate(ctx: Ctx): void {
+  const ids = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks.filter((c) => c.status === "pending").map((c) => c.id);
+  const e = estimate(loadHistory(undefined, [ctx.ledger.file]), ids, ctx.clock.now());
+  ctx.ledger.log("estimate", { remaining: e.remaining, finishAt: new Date(e.finishAtMs).toISOString(), p90At: new Date(e.p90AtMs).toISOString(), capAt: new Date(ctx.capAtMs).toISOString() });
+}
 
 /** Work through pending chunks in file order until a stop condition (or the backlog) ends the run. */
 export async function loop(ctx: Ctx, dryWorktrees: string[], run: typeof runChunk = runChunk): Promise<Stop> {
   const seen = new Set<string>();
   const requeues = new Map<string, number>();
+  const failureNotes = new Map<string, number>();
   let failures = 0;
   let lastBranch: string | null = null;
   let dryIndex = 0;
   for (;;) {
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
     const next = chunks.find((c) => c.status === "pending" && !seen.has(c.id));
-    if (!next) return { reason: "backlog_exhausted" };
+    if (!next) return { reason: "finished" };
     const stop = await checkStop(ctx, chunks, failures);
     if (stop) return stop;
     seen.add(next.id);
 
     if (ctx.dryRun) {
       lastBranch = (await dryRunChunk(ctx, next, dryIndex++, lastBranch, dryWorktrees)) ?? lastBranch;
+      ctx.progressAt = ctx.clock.now();
+      logEstimate(ctx);
       continue;
     }
     const out = await run(ctx, next, lastBranch);
+    ctx.progressAt = ctx.clock.now();
+    logEstimate(ctx);
     if (out.requeue) {
       // quota death, not a failure; the next checkStop waits out the window. A fresh run starts a new worktree.
       const n = (requeues.get(next.id) ?? 0) + 1;
@@ -47,7 +60,13 @@ export async function loop(ctx: Ctx, dryWorktrees: string[], run: typeof runChun
       failures++;
       continue;
     }
-    if (out.status === "failed") failures++;
+    if (out.status === "failed") {
+      failures++;
+      const note = out.note.replace(new RegExp(`(?<![\\w-])${next.id}(?!\\w)`, "g"), "<id>").replace(/\d+/g, "#");
+      const n = (failureNotes.get(note) ?? 0) + 1;
+      failureNotes.set(note, n);
+      if (n >= IDENTICAL_FAILURE_LIMIT) return { reason: "safety_cap", detail: `same failure 3x: ${note.slice(0, 150)}` };
+    }
     else if (out.status === "passed" || out.status === "flaky") {
       failures = 0;
       lastBranch = out.branch;
@@ -75,11 +94,17 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
-  ledger.log("run_start", { pid: process.pid, dryRun, stopAt: new Date(ctx.stopAtMs).toISOString() });
-  let stop: Stop = { reason: "backlog_exhausted" };
+  const now = ctx.clock.now();
+  if (!run.safetyCap) {
+    const pendingIds = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks.filter((c) => c.status === "pending").map((c) => c.id);
+    ctx.capAtMs = now + estimate(loadHistory(undefined, [ctx.ledger.file]), pendingIds, now).safetyCapMs;
+  }
+  ledger.log("run_start", { pid: process.pid, dryRun, stopAt: ctx.stopAtMs !== null ? new Date(ctx.stopAtMs).toISOString() : null, capAt: new Date(ctx.capAtMs).toISOString(), safetyCap: run.safetyCap ?? formatCap(ctx.capAtMs - now) });
+  let stop: Stop = { reason: "finished" };
   let exitCode = 0;
   try {
     const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log") });
+    logEstimate(ctx);
     const failed = checks.filter((c) => !c.ok).map((c) => c.name);
     if (failed.length) {
       stop = { reason: "preflight_failed", detail: failed.join(", ") };

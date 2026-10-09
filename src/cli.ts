@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { readFileSync } from "node:fs";
+import { parseBacklog } from "./backlog";
+import { estimateText, loadHistory } from "./estimate";
 import { launch } from "./launch";
 import { resolveTrunk } from "./git";
 import { errMsg, shutdown } from "./proc";
@@ -13,6 +16,7 @@ Usage: bun cli.ts <command>
   status [--repo <path>]          latest run: unit state, chunks, ledger tail, worktrees, report
   stop [--repo <path>]            stop the unit (worktrees, branches and PRs are left alone), then status
   trunk [--repo <path>]           print the trunk branch (Graphite config, origin/HEAD, else main)
+  estimate <backlog.md>           pending-chunk finish estimate and recommended safety cap
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -32,6 +36,10 @@ async function main(args: string[]): Promise<number> {
       process.on("SIGINT", () => void shutdown().then(() => process.exit(130)));
       return launch(positional, dryRun, import.meta.path);
     }
+    case "estimate":
+      if (!positional) throw new Error("estimate: missing <backlog.md>");
+      console.log(estimateText(loadHistory(), parseBacklog(readFileSync(positional, "utf8")).chunks.filter((c) => c.status === "pending").map((c) => c.id), Date.now()));
+      return 0;
     case "status":
       console.log(await statusText(await resolveRepo(flag(rest, "--repo"))));
       return 0;
