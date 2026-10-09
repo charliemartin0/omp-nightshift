@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseBacklog } from "./backlog";
-import { runChunk } from "./chunk";
+import { type Need, chunkNeeds, parseBacklog } from "./backlog";
+import { isEnvNote, runChunk } from "./chunk";
 import { type Ctx, makeCtx } from "./ctx";
 import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
 import { writeOverlay } from "./overlayfile";
-import { chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
+import { type Check, chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
 import { writeReport } from "./report";
 import { loadRunJson } from "./runjson";
@@ -24,17 +24,42 @@ export function logEstimate(ctx: Ctx): void {
 }
 
 /** Work through pending chunks in file order until a stop condition (or the backlog) ends the run. */
-export async function loop(ctx: Ctx, dryWorktrees: string[], run: typeof runChunk = runChunk): Promise<Stop> {
+export async function loop(
+  ctx: Ctx,
+  dryWorktrees: string[],
+  run: typeof runChunk = runChunk,
+  recheck: (needs: Need[]) => Promise<Check[]> = (needs) => {
+    const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
+    const { dotnetTarget } = preflightRequirements(chunks.map((c) => ({ ...c, status: "pending" })));
+    return runPreflight(ctx.run, { ledger: ctx.ledger, logFile: join(ctx.logs, "preflight.log"), needs, recheck: true, dotnetTarget });
+  },
+): Promise<Stop> {
   const seen = new Set<string>();
   const requeues = new Map<string, number>();
   const failureNotes = new Map<string, number>();
+  const envRetried = new Set<string>();
   let failures = 0;
   let lastBranch: string | null = null;
   let dryIndex = 0;
   for (;;) {
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
     const next = chunks.find((c) => c.status === "pending" && !seen.has(c.id));
-    if (!next) return { reason: "finished" };
+    if (!next) {
+      if (ctx.dryRun) return { reason: "finished" };
+      const candidates = chunks.filter((c) => c.status === "blocked" && isEnvNote(c.note) && !envRetried.has(c.id));
+      if (!candidates.length) return { reason: "finished" };
+      for (const c of candidates) envRetried.add(c.id);
+      const checks = await recheck([...new Set(candidates.flatMap(chunkNeeds))]);
+      const failed = checks.filter((c) => !c.ok);
+      const retried = failed.some((c) => !c.need) ? [] : candidates.filter((c) => !failed.some((x) => x.need && chunkNeeds(c).includes(x.need)));
+      ctx.ledger.log("env_retry", { chunks: candidates.map((c) => c.id), retried: retried.map((c) => c.id), ok: failed.length === 0, failed: failed.map((c) => c.name) });
+      for (const c of retried) {
+        ctx.setStatus(c.id, "pending", `env retry: ${c.note}`);
+        seen.delete(c.id);
+      }
+      if (!retried.length) return { reason: "finished" };
+      continue;
+    }
     const stop = await checkStop(ctx, chunks, failures);
     if (stop) return stop;
     seen.add(next.id);

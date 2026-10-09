@@ -4,6 +4,10 @@ import { parseBacklog } from "./backlog";
 import type { Ctx } from "./ctx";
 import { type LedgerEntry, readLedger } from "./ledger";
 import { errMsg, spawnGroup } from "./proc";
+import type { RunJson } from "./runjson";
+
+export const relaunchCommand = (run: RunJson): string =>
+  `bun ${join(import.meta.dir, "cli.ts")} launch ${join(run.runDir, "run.json")} --retry-blocked`;
 
 const REPORT_TIMEOUT_MS = 10 * 60_000;
 const BASE_HEADINGS = ["## What went well", "## Even better if"];

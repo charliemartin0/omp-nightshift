@@ -9,6 +9,14 @@ import { STALL_RESUME_MESSAGE, fixResumeMessage, renderChunkPrompt } from "./pro
 import { spawnGroup } from "./proc";
 import { checkQuota } from "./stops";
 
+export const ENV_BLOCK_RE = /\b(chrom(e|ium)|playwright|browser|docker|socket|permission denied|EACCES|ENOENT|command not found|not installed|ECONNREFUSED|connection refused|daemon|MCP)\b|fail(ed|s)? to (start|launch|connect|initiali[sz]e)|cannot (start|launch|connect|initiali[sz]e)/i;
+
+/** Explicit env prefix wins; old agent notes get a bounded keyword fallback. */
+export function classifyBlocked(reason: string): string {
+  return /^env:/i.test(reason) || ENV_BLOCK_RE.test(reason) ? `env: ${reason.replace(/^env:\s*/i, "")}` : reason;
+}
+export const isEnvNote = (note: string): boolean => note.startsWith("env: ");
+
 export interface ChunkPlan {
   chunk: Chunk;
   branch: string;
@@ -29,7 +37,7 @@ export interface Outcome {
 }
 
 class SetupFailure extends Error {
-  constructor(reason: string, detail: string) {
+  constructor(public readonly reason: string, detail: string) {
     super(`${reason}: ${oneLine(detail).slice(0, 200)}`);
   }
 }
@@ -90,7 +98,7 @@ function readBlocked(wt: string): string | null {
   if (!existsSync(file)) return null;
   const text = readFileSync(file, "utf8").trimStart();
   if (!text.startsWith("BLOCKED:")) return null;
-  return oneLine(text.split("\n")[0].slice("BLOCKED:".length)) || "no reason given";
+  return classifyBlocked(oneLine(text.split("\n")[0].slice("BLOCKED:".length)) || "no reason given");
 }
 
 /** Agent run, stall/fix resumes, and the independent gate for one set-up chunk. */
@@ -170,7 +178,9 @@ export async function runChunk(ctx: Ctx, chunk: Chunk, lastBranch: string | null
   try {
     startSha = await setupChunk(ctx, plan);
   } catch (e) {
-    if (e instanceof SetupFailure) return end({ status: "failed", note: e.message });
+    if (e instanceof SetupFailure) return end(["fetch_failed", "setup_failed"].includes(e.reason)
+      ? { status: "blocked", note: `env: ${e.message}` }
+      : { status: "failed", note: e.message });
     throw e;
   }
   writeFileSync(join(ctx.prompts, `${chunk.id}.md`), renderChunkPrompt(ctx.run, chunk, plan));
