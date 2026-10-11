@@ -4,6 +4,7 @@ import type { Chunk } from "./backlog";
 import type { Ctx } from "./ctx";
 import { git } from "./git";
 import { spawnGroup } from "./proc";
+import { sweepLogger } from "./sweep";
 
 export const TEST_RUNS = 3;
 
@@ -150,6 +151,8 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
       env: { CI: "1" },
       timeoutMs: ctx.run.limits.testTimeoutMinutes * 60_000,
       onSuspend: (gap) => ctx.noteSuspend(gap, "gate", chunk.id),
+      sweep: "deep",
+      onSweep: sweepLogger(ctx, `gate-test-${k}`, chunk.id),
       logFile,
     });
     if (r.code === 0 && !r.timedOut) passes++;
