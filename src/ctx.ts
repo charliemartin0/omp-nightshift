@@ -19,6 +19,8 @@ export interface Ctx {
   stopAtMs: number | null;
   capAtMs: number;
   progressAt: number;
+  /** total host-suspend time excluded from the safety cap, no-progress and per-phase timers */
+  suspendMs: number;
   runTokens: number;
   /** providers of the build model's fallback chain (set from the overlay; empty = no chain check) */
   buildProviders: string[];
@@ -34,6 +36,8 @@ export interface Ctx {
   sessions: string;
   /** Rewrites only that chunk's status/note lines; no-op in dry-run. */
   setStatus(id: string, status: Status, note: string): void;
+  /** Record a host suspend: the safety cap and the no-progress timer do not count the gap. `stopAt` stays wall-clock. */
+  noteSuspend(gapMs: number, where: string, chunk?: string): void;
 }
 
 export const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -52,13 +56,14 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
   for (const d of [logs, prompts, sessions]) mkdirSync(d, { recursive: true });
   const backlog = join(run.runDir, "backlog.md");
   const now = Date.now();
-  return {
+  const ctx: Ctx = {
     run,
     dryRun,
     ledger: new Ledger(join(run.runDir, dryRun ? "ledger.dry-run.jsonl" : "ledger.jsonl")),
     stopAtMs: run.stopAt ? resolveStopAt(run.stopAt).getTime() : null,
     capAtMs: now + (run.safetyCap ? parseDuration(run.safetyCap) : 12 * 3_600_000),
     progressAt: now,
+    suspendMs: 0,
     runTokens: 0,
     buildProviders: [],
     clock: realClock,
@@ -82,5 +87,12 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
       writeFileSync(tmp, setChunkStatus(readFileSync(backlog, "utf8"), id, status, oneLine(note)));
       renameSync(tmp, backlog);
     },
+    noteSuspend(gapMs, where, chunk) {
+      ctx.suspendMs += gapMs;
+      ctx.capAtMs += gapMs;
+      ctx.progressAt += gapMs;
+      ctx.ledger.log("host_suspend", { ...(chunk ? { chunk } : {}), where, gapSec: Math.round(gapMs / 1000) });
+    },
   };
+  return ctx;
 }

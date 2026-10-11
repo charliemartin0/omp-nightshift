@@ -149,6 +149,7 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
       cwd: g.wt,
       env: { CI: "1" },
       timeoutMs: ctx.run.limits.testTimeoutMinutes * 60_000,
+      onSuspend: (gap) => ctx.noteSuspend(gap, "gate", chunk.id),
       logFile,
     });
     if (r.code === 0 && !r.timedOut) passes++;

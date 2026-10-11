@@ -99,6 +99,15 @@ are not progress), after three identical normalised failure notes (chunk ids/dig
 tokens exceed `tokenCap × chunk count`. Existing max-PR, consecutive-failure and quota limits still apply.
 `status` shows the latest stop reason, finish estimate, safety cap and optional override.
 
+## Host suspend
+
+A sleeping host (Windows/WSL sleep, a closed lid) must not look like a hung agent. The agent watchdog, the setup and
+gate test timeouts and quota sleeps all detect a timer that fires 90 s or more late, subtract that gap, and log a
+`host_suspend {where, gapSec}` ledger event. The gap is also removed from the safety cap and the no-progress timer;
+an explicit `stopAt` stays wall-clock. Watchdog trips now say which limit fired, for example
+`watchdog timeout: ran 12 min awake against a 95 min wall-clock limit, 300 min host suspend excluded; 473629 of
+3000000 tokens (cap not reached)`, so a timeout is never reported as a token cap.
+
 ## Preflight
 
 Global checks cover power, a clean main checkout, remote/forge access (including `gh api user`) and the
