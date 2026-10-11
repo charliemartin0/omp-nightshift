@@ -118,9 +118,24 @@ fail the next gate with "port already in use" or serve another chunk's worktree.
 are touched; processes that call `setsid` themselves, and everything unrelated, are left alone. Transient systemd scopes
 were rejected because a scope outlives the unit if the runner crashes.
 
+## Keep awake (Windows hosts)
+
+systemd inhibitors only hold locks inside WSL; Windows can still sleep and freeze the VM. Under WSL the runner starts
+a `powershell.exe` helper (`-EncodedCommand`, no admin needed) that calls
+`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` for as long as the runner
+touches `<runDir>/.keepawake` (it exits by itself if the lease goes stale for 2 min or the runner dies). Real runs log
+`keepawake {ok, detail}`; a failed helper is a warning, never a stop. `powershell.exe` and `schtasks.exe` are found on
+PATH or in `/mnt/c/Windows/System32`; `OMP_NIGHTSHIFT_POWERSHELL` / `OMP_NIGHTSHIFT_SCHTASKS` override them and
+`OMP_NIGHTSHIFT_WINDOWS=off` disables everything Windows-specific.
+
+An explicit sleep command beats an execution-state request, so preflight also runs `windows_sleep`: it lists enabled
+non-Microsoft scheduled tasks whose action sleeps, suspends or hibernates the PC. A task whose script no longer exists
+is reported as inert; a live one is a warning (the launch is not blocked) with the exact
+`Disable-ScheduledTask -TaskName '<name>'` fix (set `OMP_NIGHTSHIFT_ALLOW_SCHEDULED_SLEEP=1` to silence it).
+
 ## Preflight
 
-Global checks cover power, a clean main checkout, remote/forge access (including `gh api user`) and the
+Global checks cover power, a clean main checkout, `windows_sleep` (WSL only, warning only), remote/forge access (including `gh api user`) and the
 baseline test in a disposable `_preflight` worktree. A global failure stops the run. Tool checks run only
 for pending chunks that need them: `docker ps`, a real Chrome/Chromium headless DOM render, a configured
 Playwright MCP initialize/navigate call, and `dotnet restore` in the same worktree after the baseline passes.

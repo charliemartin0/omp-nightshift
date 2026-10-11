@@ -6,6 +6,7 @@ import { type Ctx, deadline, makeCtx } from "./ctx";
 import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
+import { type KeepAwake, startKeepAwake } from "./keepawake";
 import { writeOverlay } from "./overlayfile";
 import { type Check, chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
@@ -115,8 +116,10 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
 
   // SIGTERM/SIGINT: kill the current child group, mark the running chunk `stopped`, no report, exit 0.
   // Worktrees, branches and PRs are never touched.
+  let keepAwake: KeepAwake | null = null;
   const onSignal = async () => {
     await shutdown();
+    await keepAwake?.stop();
     const chunk = ctx.running;
     if (chunk) ctx.setStatus(chunk, "stopped", "stopped by signal");
     ledger.log("stop", { reason: "signal", ...(chunk ? { chunk } : {}) });
@@ -134,6 +137,10 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
   let stop: Stop = { reason: "finished" };
   let exitCode = 0;
   try {
+    if (!dryRun) {
+      keepAwake = await startKeepAwake({ leaseFile: join(run.runDir, ".keepawake") });
+      ledger.log("keepawake", { ok: keepAwake.ok, detail: keepAwake.detail });
+    }
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
     const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log"), ...preflightRequirements(chunks) });
     logEstimate(ctx);
@@ -157,6 +164,7 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
       ctx.running = null;
     }
   } finally {
+    await keepAwake?.stop();
     for (const wt of dryWorktrees) await removeWorktree(run.repo, wt);
   }
   ledger.log("stop", { ...stop });
