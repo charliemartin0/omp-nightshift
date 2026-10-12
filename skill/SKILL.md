@@ -79,7 +79,7 @@ One batched `ask`; the first option is the recommended default.
 - Run limit: `Safety cap <safetyCap> (2× p90 estimate)` (recommended) / `Safety cap + stop at 07:00` / `Safety cap + stop at 08:00`.
 - Self-review pass after the backlog: `Off` (recommended) / `On`.
 - Max PRs: `4` / `2` / `6`.
-- Quota floors (7d remaining): `Anthropic 7d >=20%, OpenAI >=40%, others >=20%` (recommended) / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one; if every provider is unusable the run waits for the earliest reset, it never stops) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
+- Quota floors (7d remaining): `Anthropic 7d >=20%, OpenAI >=40%, OpenCode Go >=20%, others >=20%` (recommended) / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one; if every provider is unusable the run waits for the earliest reset, it never stops) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
 - Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
 - Models: `plan @default, build @smol` / `plan @default, build @default` / `plan @smol, build @smol`.
 - PR mode: `Independent drafts off <trunk>` / `One stack`.
@@ -93,7 +93,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `H
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
   "runDir": "/abs", "worktreeRoot": "/abs", "unit": "omp-overnight-<repoName>-<date>",
   "remote": "origin", "trunk": "main", "forge": "graphite|github|local", "prMode": "independent|stack",
-  "safetyCap": "<from estimate>", "selfReview": false, "maxPrs": 4, "floors": { "anthropic": 0.2, "openai-codex": 0.4 }, "reservePct": 40,
+  "safetyCap": "<from estimate>", "selfReview": false, "maxPrs": 4, "floors": { "anthropic": 0.2, "openai-codex": 0.4, "opencode-go": 0.2 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
