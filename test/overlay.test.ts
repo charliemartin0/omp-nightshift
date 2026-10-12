@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertNoFreeModels, buildChainProviders, buildOverlay, isFreeModel, withoutFreeModels } from "../src/overlay";
+import { assertNoFreeModels, buildChainProviders, buildOverlay, isFallbackOn, isFreeModel, withoutFreeModels } from "../src/overlay";
 import { validateRunJson } from "../src/runjson";
 import roles from "./fixtures/roles.json";
 import chains from "./fixtures/chains.json";
@@ -63,4 +63,15 @@ test("a run configured to use a free model directly is rejected", () => {
   expect(() => assertNoFreeModels({ plan: "@default", build: "@smol", report: "@smol" }, roles)).not.toThrow();
   expect(() => assertNoFreeModels({ plan: "x/y-free", build: "@smol", report: "@smol" }, roles)).toThrow(/free model/);
   expect(() => assertNoFreeModels({ plan: "@cheap", build: "@smol", report: "@smol" }, { ...roles, cheap: "x/y:free" })).toThrow(/models\.plan/);
+});
+
+test("overlay copies retry.fallbackOn from the live config only when set", () => {
+  const y = buildOverlay(roles, chains, 40, "usage-limit");
+  expect(y).toContain('retry:\n  modelFallback: true\n  usageAwareFallback: true\n  usageReservePct: 40\n  waitForUsageReset: false\n  fallbackOn: "usage-limit"\n  fallbackChains:');
+  expect(buildOverlay(roles, chains, 40)).not.toContain("fallbackOn");
+});
+
+test("isFallbackOn accepts only omp's values", () => {
+  for (const v of ["any", "usage-limit", "except-usage-limit"]) expect(isFallbackOn(v)).toBe(true);
+  for (const v of ["usage", "", null, 1, undefined]) expect(isFallbackOn(v)).toBe(false);
 });
