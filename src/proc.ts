@@ -3,6 +3,7 @@
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import type { FileSink } from "bun";
+import { guardTimeout } from "./suspend";
 
 export const GRACE_MS = 15_000;
 const OUTPUT_CAP = 4_000_000;
@@ -109,8 +110,10 @@ export function openAppend(file: string): number {
 export interface SpawnOpts {
   cwd?: string;
   env?: Record<string, string>;
-  /** Kill the group (SIGTERM, 15 s, SIGKILL) after this long. */
+  /** Kill the group (SIGTERM, 15 s, SIGKILL) after this long of awake time (host-suspend gaps are excluded). */
   timeoutMs?: number;
+  /** Called with the gap (ms) each time a host suspend was excluded from `timeoutMs`. */
+  onSuspend?: (gapMs: number) => void;
   /** Append stdout+stderr here (header line `$ argv`). */
   logFile?: string;
 }
@@ -137,11 +140,15 @@ export async function spawnGroup(argv: string[], o: SpawnOpts = {}): Promise<Spa
   const fd = o.logFile ? openAppend(o.logFile) : null;
   if (fd !== null) writeSync(fd, `$ ${argv.join(" ")}\n`);
   let timedOut = false;
-  const timer = o.timeoutMs
-    ? setTimeout(() => {
-        timedOut = true;
-        void g.kill();
-      }, o.timeoutMs)
+  const cancelTimeout = o.timeoutMs
+    ? guardTimeout({
+        timeoutMs: o.timeoutMs,
+        onSuspend: o.onSuspend,
+        onTimeout: () => {
+          timedOut = true;
+          void g.kill();
+        },
+      })
     : undefined;
   const out = { text: "" };
   const err = { text: "" };
@@ -149,7 +156,7 @@ export async function spawnGroup(argv: string[], o: SpawnOpts = {}): Promise<Spa
   const code = await g.exited;
   // A daemonised grandchild outside the group could hold the pipes open; do not wait on it forever.
   await settle(drained, 3000);
-  clearTimeout(timer);
+  cancelTimeout?.();
   if (fd !== null) closeSync(fd);
   return { code, timedOut, stdout: out.text, stderr: err.text };
 }
