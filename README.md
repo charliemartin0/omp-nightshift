@@ -97,29 +97,54 @@ outcome. Type samples need at least three runs; otherwise the estimate uses pool
 The run stops within 20 min of the effective deadline with `safety_cap` or `stopAt`. It also stops with
 `safety_cap` after 60 min without a chunk finishing or a real future-reset quota sleep (stale reset rechecks
 are not progress), after three identical normalised failure notes (chunk ids/digits removed), or when run
-tokens exceed `tokenCap × chunk count`. Existing max-PR, consecutive-failure and quota limits still apply.
+tokens exceed `tokenCap × chunk count`. Two failed attempts in a row stop with `consecutive_failures`. Both failure
+limits consume outcomes in dispatch order, not completion order: passed/flaky resets the consecutive streak;
+blocked/skipped and quota requeues neither count nor reset it. Identical normalized failures accumulate across passes.
+An out-of-order completion holds new admission until earlier attempts finish, so a later pass cannot erase an earlier
+failure limit and fast failures cannot escape accounting behind a slow chunk. Retried attempts get a new dispatch position.
 `status` shows the latest stop reason, finish estimate, safety cap and optional override.
 
 ## Parallel chunks
 
 `concurrency` in `run.json` (default 1, max 3) runs that many pending chunks at once, in backlog order. It requires
 `prMode: independent`, because stack mode bases each branch on the previous chunk's branch. Every chunk gets its own
-branch and worktree. The runner's own shared-repository steps (planning, fetch, `git worktree add --no-track`,
-`gt track`) run one chunk at a time, so parallel chunks never claim the same branch or worktree path. Setup commands,
-agents and gate tests then run side by side, and agents' own Git and `gt` commands are not serialised: they share the
-repository's refs, object store and Graphite metadata as well as local services and ports. Choose more than 1 only
-when the chunks' tests can run at the same time; an agent's fetch holding a trunk ref lock can still make another
-chunk's fetch fail (an environment block, retried once like any other).
+branch and worktree. Shared repository mutations use `flock` on `omp-nightshift.lock` in the common Git directory,
+so runner planning/fetch/worktree creation/tracking and agent delivery exclude each other across processes and linked
+worktrees. The chunk prompt defines `overnight_repo`, a shell wrapper resolving the common directory at runtime:
+use it for every `git fetch`, `git pull`, `git push`, and Graphite command, including `gt modify` and `gt submit`.
+Never nest the wrapper or hold it around setup, agents, or tests. Local commits on distinct branches remain independent.
+The lock is cooperative: commands outside the runner and agents ignoring the wrapper are not protected.
+Acquisition waits are bounded: the runner and agent wrapper default to 120 seconds; Git calls account for lock wait
+within their command timeout. A busy agent wrapper exits 75 with an explicit diagnostic rather than waiting forever.
+Setup commands, agents and gate tests run side by side; choose concurrency above 1 only when they do not share
+ports, databases, containers, or fixed output paths.
 
-A stop condition or runner error only ends dispatch. Running chunks finish first (each is bounded by the deadline),
-so no chunk is left `running`, and self-review and the report run once at the end with final outcomes. A chunk that
-hits a runner error is marked `failed` with its own error at once, not after the others finish. While chunks
-run, a quota wait holds dispatch instead of sleeping, and so do running chunks that could still reach `maxPrs`.
+A global stop condition or runner-level error ends dispatch, then drains running chunks before finalization.
+A chunk exception instead marks only that chunk failed (`chunk_error`), records its outcome and continues dispatch
+subject to the ordinary failure limits. Self-review and the report run once after draining, including partial launches.
+While chunks run, quota waits and potential `maxPrs` exhaustion hold new admission rather than sleeping.
+
+Each additional slot reads fresh quota and requires more headroom: with `N = running + 1`, a configured remaining
+threshold `t` becomes `1 - (1 - t) / N` for admission only, for both provider floors and the fallback reserve.
+For example, a 40% reserve requires more than 70% remaining for two concurrent chunks and more than 80% for three.
+This divides allowable consumption across slots without multiplying a threshold above 100%. If only the stricter
+admission check fails, new starts wait for a chunk to finish; the normal one-chunk floors/reserve still determine
+whether the run waits for quota reset or stops. Model fallback settings themselves are unchanged.
+
 Once idle, the runner waits out quota windows as before. A quota-requeued chunk reruns in a fresh worktree, never
-alongside itself. Environment-blocked chunks are rechecked only when nothing is running, and SIGTERM marks every
-running chunk `stopped`. Each ledger line is one append tagged with its `chunk`, so events from parallel chunks
-interleave without tearing and stay attributable. The finish estimate still assumes one chunk at a time, so the
-default safety cap stays conservative.
+alongside itself. Environment-blocked chunks are rechecked only when nothing is running. Each chunk-scoped ledger
+line is one append tagged with its `chunk`, so interleaved events stay attributable. The finish estimate still assumes
+one chunk at a time, so the default safety cap stays conservative.
+
+SIGTERM records both admitted setup chunks (including those waiting for the repository lock) and agent-running
+chunks as `stopped`, with distinct phase notes. A real relaunch recovers unmatched setup ownership before preflight:
+only an exact, registered worktree with no changed, untracked, or ignored files, on its recorded unchanged base and
+branch in the same common Git directory, may be removed; a partial branch-only creation uses compare-and-delete.
+Proven cleanup resets the interrupted setup chunk to `pending`, so the next attempt can reclaim its names.
+Advanced/dirty, ignored-file-bearing, agent-started, explicitly completed/failed/blocked, unrelated, or unverifiable
+resources are retained with a `setup_recovered` explanation. Recovery is idempotent; dry runs never authorize removal
+of real resources. Signal stops still skip self-review and report generation. Dry cleanup failures retain the refused
+worktree, continue the remaining cleanup, and still produce a runner-error report.
 
 ## Preflight
 
@@ -174,8 +199,9 @@ unchanged.
 
 ## Self-review
 
-`selfReview` defaults to false. When enabled, after `finished` or `max_prs` the report model asks exactly
-one reviewer subagent per successful draft PR from the current launch for read-only P0–P3 findings
+`selfReview` defaults to false. When enabled, every non-signal launch (including partial runs stopped by failures
+or runner errors) makes one end-of-run pass. The report model asks exactly one reviewer subagent per successful
+draft PR from the current launch for read-only P0–P3 findings
 (≤200 words). Findings go to `reviews/<id>.md` and the report, never to PR comments/reviews, pushes or
 ready/approval actions. Local delivery is skipped, and the pass stops without waiting when quota or
 deadline headroom is unavailable. It does not fix code.
@@ -184,5 +210,5 @@ deadline headroom is unavailable. It does not fix code.
 ## Modules
 Pure libs: `backlog`, `quota`, `watchdog`, `overlay`, `estimate` (history loading at the boundary). Runner:
 `runner` (loop), `chunk` (setup, agent, resumes), `gate`, `agent` (omp + watchdog), `preflight`, `stops`,
-`report`, `review`, `prompt`, `dryrun`; plumbing: `proc`, `git`, `ledger`, `runjson`, `ctx`, `overlayfile`,
-`launch`, `status`, `cli`.
+`report`, `review`, `prompt`, `dryrun`, `setup` (interrupted ownership); plumbing: `proc`, `git`, `repolock`, `ledger`,
+`runjson`, `ctx`, `overlayfile`, `launch`, `status`, `cli`.

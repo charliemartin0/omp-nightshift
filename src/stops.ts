@@ -24,9 +24,7 @@ export function bst(ms: number): string {
   }).format(ms);
 }
 
-/** `omp usage --json` (read-only, zero model tokens) -> evaluateQuota; logs a `quota` event (tagged with the asking chunk). */
-export async function checkQuota(ctx: Ctx, chunk?: string): Promise<QuotaResult> {
-  const res = evaluateQuota(await ctx.readUsage(), ctx.run.floors, ctx.buildProviders, ctx.run.reservePct);
+function recordQuota(ctx: Ctx, res: QuotaResult, chunk?: string): QuotaResult {
   ctx.ledger.log(
     "quota",
     {
@@ -44,6 +42,11 @@ export async function checkQuota(ctx: Ctx, chunk?: string): Promise<QuotaResult>
     },
   );
   return res;
+}
+
+/** `omp usage --json` (read-only, zero model tokens) -> evaluateQuota; logs a `quota` event (tagged with the asking chunk). */
+export async function checkQuota(ctx: Ctx, chunk?: string): Promise<QuotaResult> {
+  return recordQuota(ctx, evaluateQuota(await ctx.readUsage(), ctx.run.floors, ctx.buildProviders, ctx.run.reservePct), chunk);
 }
 
 /**
@@ -109,14 +112,30 @@ export async function checkStop(ctx: Ctx, chunks: Chunk[], consecutiveFailures: 
 }
 
 /**
- * checkStop while `running` chunks are in flight, without ever sleeping: a quota wait, or running chunks that could
- * still reach maxPrs, holds dispatch until one of them finishes.
+ * checkStop while `running` chunks are in flight, without ever sleeping: quota waits, insufficient headroom for
+ * the next concurrent slot, or running chunks that could still reach maxPrs hold dispatch until a chunk finishes.
  */
 export async function checkDispatch(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number, running: number): Promise<Stop | "hold" | null> {
   const stop = checkLimits(ctx, chunks, consecutiveFailures);
   if (stop) return stop;
   if (chunks.filter((c) => c.status === "passed" || c.status === "flaky").length + running >= ctx.run.maxPrs) return "hold";
-  const q = await checkQuota(ctx);
-  if (q.ok) return null;
-  return q.reason === "quota_wait" ? "hold" : { reason: q.reason, detail: q.detail };
+  const usage = await ctx.readUsage();
+  const q = recordQuota(ctx, evaluateQuota(usage, ctx.run.floors, ctx.buildProviders, ctx.run.reservePct));
+  if (!q.ok) return q.reason === "quota_wait" ? "hold" : { reason: q.reason, detail: q.detail };
+
+  const slots = running + 1;
+  // Divide allowable consumption across slots, rather than multiplying remaining thresholds beyond 100%.
+  const floors = slots === 1 ? ctx.run.floors : Object.fromEntries(
+    Object.entries(ctx.run.floors).map(([provider, floor]) => [provider, 1 - (1 - floor) / slots]),
+  );
+  const reservePct = slots === 1 ? ctx.run.reservePct : (1 - (1 - ctx.run.reservePct / 100) / slots) * 100;
+  const admission = slots === 1 ? q : evaluateQuota(usage, floors, ctx.buildProviders, reservePct);
+  ctx.ledger.log("quota_admission", {
+    slots,
+    floors,
+    reservePct,
+    ok: admission.ok,
+    ...(!admission.ok ? { reason: admission.reason, detail: admission.detail } : {}),
+  });
+  return admission.ok ? null : "hold";
 }

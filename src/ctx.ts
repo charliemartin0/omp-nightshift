@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Status, setChunkStatus } from "./backlog";
 import { Ledger } from "./ledger";
+import { withRepoLock } from "./repolock";
 import { spawnGroup } from "./proc";
 import { type RunJson, parseDuration, resolveStopAt } from "./runjson";
 
@@ -12,17 +13,8 @@ export interface Clock {
 
 export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) };
 
-/** Runs callers one at a time in call order; a rejection does not block later callers. */
+/** Serialises short repository mutation callbacks; nested runner scopes reenter the same lock. */
 export type Lock = <T>(fn: () => Promise<T>) => Promise<T>;
-
-export function makeLock(): Lock {
-  let tail: Promise<unknown> = Promise.resolve();
-  return (fn) => {
-    const run = tail.then(fn);
-    tail = run.catch(() => undefined);
-    return run;
-  };
-}
 
 export interface Ctx {
   run: RunJson;
@@ -39,9 +31,11 @@ export interface Ctx {
   readUsage(): Promise<unknown>;
   /** chunks currently in status `running` (for the signal handler / crash path) */
   running: Set<string>;
+  /** Chunks admitted to setup, including planning and waiting for the repository lock. */
+  settingUp: Set<string>;
   /**
-   * Serialises the runner's shared-repository Git steps (fetch, branch + worktree creation, gt track) across parallel
-   * chunks, so they never race each other or claim the same branch or worktree path.
+   * Serialises short shared-repository steps against both runner chunks and agent shell wrappers, using flock in
+   * the common Git directory. Setup commands, agents and tests run outside this lock.
    */
   repoLock: Lock;
   backlog: string;
@@ -88,7 +82,8 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
       }
     },
     running: new Set(),
-    repoLock: makeLock(),
+    settingUp: new Set(),
+    repoLock: (fn) => withRepoLock(run.repo, fn),
     backlog,
     overlay: join(run.runDir, "overlay.yml"),
     logs,

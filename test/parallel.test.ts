@@ -43,6 +43,11 @@ const statuses = (ctx: Ctx) => Object.fromEntries(parseBacklog(readFileSync(ctx.
 function parallel(concurrency: number, chunks: (string | { id: string; status?: string; note?: string; needs?: string })[]) {
   const s = setup();
   s.ctx.run.concurrency = concurrency;
+  s.ctx.readUsage = async () => {
+    const usage = healthy();
+    for (const report of usage.reports) for (const limit of report.limits) limit.amount.remainingFraction = 0.95;
+    return usage;
+  };
   backlog(s.ctx, chunks.map((c) => typeof c === "string" ? { id: c } : c));
   return s;
 }
@@ -58,7 +63,7 @@ test("concurrency defaults to 1, accepts 1-3 and needs independent PR mode", () 
   expect(validateRunJson({ ...raw, concurrency: 1, prMode: "stack" }).concurrency).toBe(1);
 });
 
-test("runs at most `concurrency` chunks at once and starts the next as one finishes", async () => {
+test("runs at most `concurrency` chunks and holds admission behind out-of-order completions", async () => {
   const { ctx } = parallel(2, ["a", "b", "c"]);
   const f = controlled();
   const done = loop(ctx, [], f.run);
@@ -66,8 +71,10 @@ test("runs at most `concurrency` chunks at once and starts the next as one finis
   expect(f.started).toEqual(["a", "b"]);
   f.finish("b");
   await flush();
-  expect(f.started).toEqual(["a", "b", "c"]);
+  expect(f.started).toEqual(["a", "b"]);
   f.finish("a");
+  await flush();
+  expect(f.started).toEqual(["a", "b", "c"]);
   f.finish("c");
   expect((await done).reason).toBe("finished");
   expect(f.peak()).toBe(2);
@@ -139,27 +146,67 @@ test("a quota-requeued chunk reruns without ever running twice at once", async (
   expect(statuses(ctx)).toEqual({ a: "passed", b: "passed" });
 });
 
-test("an error escaping a running chunk fails it at once and surfaces after the others finish", async () => {
-  const { ctx } = parallel(2, ["a", "b", "c"]);
-  const f = controlled();
-  const run = async (c: Ctx, chunk: Chunk) => {
-    if (chunk.id !== "a") return f.run(c, chunk);
-    c.setStatus("a", "running", "");
-    c.running.add("a");
-    throw new Error("boom");
-  };
-  let settled = false;
-  const done = loop(ctx, [], run).finally(() => { settled = true; });
-  done.catch(() => undefined);
-  await flush();
-  expect(f.started).toEqual(["b"]);
-  expect(settled).toBe(false);
-  expect(parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks[0]).toMatchObject({ status: "failed", note: "runner_error: boom" });
-  f.finish("b");
-  await expect(done).rejects.toThrow("boom");
-  expect(f.started).toEqual(["b"]);
-  expect(statuses(ctx)).toEqual({ a: "failed", b: "passed", c: "pending" });
-  expect(ctx.running.size).toBe(0);
+test("an escaping chunk error fails only that chunk and dispatch continues", async () => {
+  for (const phase of ["setup", "running"] as const) {
+    const { ctx } = parallel(2, ["a", "b", "c"]);
+    const f = controlled();
+    const run = async (c: Ctx, chunk: Chunk) => {
+      if (chunk.id !== "a") return f.run(c, chunk);
+      if (phase === "running") {
+        c.setStatus("a", "running", "");
+        c.running.add("a");
+      } else c.settingUp.add("a");
+      throw new Error(`${phase} boom`);
+    };
+    const done = loop(ctx, [], run);
+    await flush();
+    expect(f.started).toEqual(["b", "c"]);
+    expect(parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks[0]).toMatchObject({ status: "failed", note: `chunk_error: ${phase} boom` });
+    f.finish("b");
+    f.finish("c");
+    expect((await done).reason).toBe("finished");
+    expect(statuses(ctx)).toEqual({ a: "failed", b: "passed", c: "passed" });
+    expect(ctx.running.size).toBe(0);
+    expect(ctx.settingUp.size).toBe(0);
+    expect(entries(ctx).filter((e) => e.chunk === "a" && e.event === "chunk_end")).toMatchObject([{ status: "failed", note: `chunk_error: ${phase} boom` }]);
+  }
+});
+
+test("consecutive failures count by dispatch order for every completion permutation", async () => {
+  for (const order of [["a", "b", "c"], ["a", "c", "b"], ["b", "a", "c"], ["b", "c", "a"], ["c", "a", "b"], ["c", "b", "a"]]) {
+    const { ctx } = parallel(3, ["a", "b", "c", "d"]);
+    const f = controlled();
+    const done = loop(ctx, [], f.run);
+    await flush();
+    expect(f.started).toEqual(["a", "b", "c"]);
+    for (const id of order) {
+      f.finish(id, id === "c" ? { status: "passed", note: "ok" } : { status: "failed", note: `${id} distinct failure` });
+      await flush();
+    }
+    // A slot may have been backfilled before the second failure was known; such work is drained, not cancelled.
+    if (f.open.has("d")) f.finish("d");
+    expect((await done).reason).toBe("consecutive_failures");
+    expect(statuses(ctx)).toMatchObject({ a: "failed", b: "failed", c: "passed" });
+  }
+});
+
+test("identical failure totals are stable across completion permutations and interleaved passes", async () => {
+  for (const order of [["a", "b", "c"], ["a", "c", "b"], ["b", "a", "c"], ["b", "c", "a"], ["c", "a", "b"], ["c", "b", "a"]]) {
+    const { ctx } = parallel(3, ["a", "b", "c", "d", "e"]);
+    const f = controlled();
+    const done = loop(ctx, [], f.run);
+    await flush();
+    for (const id of order) {
+      f.finish(id, id === "b" ? { status: "passed", note: "ok" } : { status: "failed", note: `test ${id} failed at line 42` });
+      await flush();
+    }
+    f.finish("e", { status: "failed", note: "test e failed at line 64" });
+    await flush();
+    f.finish("d");
+    const stop = await done;
+    expect(stop.reason).toBe("safety_cap");
+    expect(stop.detail).toContain("same failure 3x");
+  }
 });
 
 test("environment blocks are rechecked only once nothing runs, then retried side by side", async () => {
@@ -262,4 +309,22 @@ test("parallel dry runs claim distinct worktrees", async () => {
   expect((await loop(ctx, created)).reason).toBe("finished");
   expect(entries(ctx).filter((e) => e.event === "chunk_end").map((e) => e.status)).toEqual(["dry_run", "dry_run", "dry_run"]);
   expect(new Set(created).size).toBe(3);
+});
+
+test("dry setup exception after an earlier success does not suppress the next pending chunk", async () => {
+  const { ctx: base, dir } = setup();
+  const { repo } = await realRepo(dir, 1);
+  const ctx = makeCtx(validateRunJson({ ...base.run, repo, concurrency: 1 }), true);
+  ctx.readUsage = base.readUsage;
+  backlog(ctx, [{ id: "a" }, { id: "b" }, { id: "c" }]);
+  const claim = ctx.repoLock;
+  let calls = 0;
+  ctx.repoLock = async (fn) => {
+    if (++calls === 2) throw new Error("repository lock unavailable");
+    return claim(fn);
+  };
+  expect((await loop(ctx, [])).reason).toBe("finished");
+  expect(entries(ctx).filter((e) => e.event === "chunk_end").map((e) => [e.chunk, e.status])).toEqual([
+    ["a", "dry_run"], ["b", "failed"], ["c", "dry_run"],
+  ]);
 });
