@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { type Status, setChunkStatus } from "./backlog";
 import { Ledger } from "./ledger";
 import { spawnGroup } from "./proc";
-import { type RunJson, resolveStopAt } from "./runjson";
+import { type RunJson, parseDuration, resolveStopAt } from "./runjson";
 
 export interface Clock {
   now(): number;
@@ -16,7 +16,10 @@ export interface Ctx {
   run: RunJson;
   dryRun: boolean;
   ledger: Ledger;
-  stopAtMs: number;
+  stopAtMs: number | null;
+  capAtMs: number;
+  progressAt: number;
+  runTokens: number;
   /** providers of the build model's fallback chain (set from the overlay; empty = no chain check) */
   buildProviders: string[];
   clock: Clock;
@@ -35,17 +38,28 @@ export interface Ctx {
 
 export const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
+/** The optional wall-clock override wins only when it is earlier than the safety cap. */
+export function deadline(ctx: Ctx): { atMs: number; reason: "safety_cap" | "stopAt" } {
+  return ctx.stopAtMs !== null && ctx.stopAtMs <= ctx.capAtMs
+    ? { atMs: ctx.stopAtMs, reason: "stopAt" }
+    : { atMs: ctx.capAtMs, reason: "safety_cap" };
+}
+
 export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
   const logs = join(run.runDir, "logs");
   const prompts = join(run.runDir, "prompts");
   const sessions = join(run.runDir, "sessions");
   for (const d of [logs, prompts, sessions]) mkdirSync(d, { recursive: true });
   const backlog = join(run.runDir, "backlog.md");
+  const now = Date.now();
   return {
     run,
     dryRun,
     ledger: new Ledger(join(run.runDir, dryRun ? "ledger.dry-run.jsonl" : "ledger.jsonl")),
-    stopAtMs: resolveStopAt(run.stopAt).getTime(),
+    stopAtMs: run.stopAt ? resolveStopAt(run.stopAt).getTime() : null,
+    capAtMs: now + (run.safetyCap ? parseDuration(run.safetyCap) : 12 * 3_600_000),
+    progressAt: now,
+    runTokens: 0,
     buildProviders: [],
     clock: realClock,
     async readUsage() {

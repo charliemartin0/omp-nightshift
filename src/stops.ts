@@ -1,11 +1,13 @@
 import type { Chunk } from "./backlog";
-import type { Ctx } from "./ctx";
+import { type Ctx, deadline } from "./ctx";
 import { type QuotaResult, evaluateQuota } from "./quota";
 
 export const STOP_MARGIN_MS = 20 * 60_000;
 export const MAX_CONSECUTIVE_FAILURES = 2;
 export const QUOTA_RECHECK_MS = 10 * 60_000;
 export const QUOTA_RESET_SLACK_MS = 2 * 60_000;
+export const NO_PROGRESS_MS = 60 * 60_000;
+export const IDENTICAL_FAILURE_LIMIT = 3;
 
 export interface Stop {
   reason: string;
@@ -43,7 +45,7 @@ export async function checkQuota(ctx: Ctx): Promise<QuotaResult> {
 
 /**
  * Turns a `quota_wait` into a sleep until the earliest reset (+ slack, re-checking every QUOTA_RECHECK_MS), never
- * past the stop time. Any other failure is a stop; dry runs never sleep.
+ * past the effective deadline. Real future-reset sleeps count as progress; stale usage rechecks do not.
  */
 export async function waitForQuota(ctx: Ctx, first: QuotaResult): Promise<Stop | null> {
   let q = first;
@@ -52,10 +54,14 @@ export async function waitForQuota(ctx: Ctx, first: QuotaResult): Promise<Stop |
     if (q.ok) return null;
     if (q.reason !== "quota_wait") return { reason: q.reason, detail: q.detail };
     const now = ctx.clock.now();
+    if (now - ctx.progressAt >= NO_PROGRESS_MS) {
+      return { reason: "safety_cap", detail: `no progress for ${Math.round((now - ctx.progressAt) / 60_000)} min (quota usage stale after reset)` };
+    }
     const target = q.resetsAt + QUOTA_RESET_SLACK_MS;
     const until = target > now ? target : now + QUOTA_RECHECK_MS; // reset passed but usage still stale
-    if (until > ctx.stopAtMs - STOP_MARGIN_MS) {
-      return { reason: "stop_time", detail: `quota ${q.provider} ${q.window} resets ${bst(q.resetsAt)}, after stop ${bst(ctx.stopAtMs)}` };
+    const d = deadline(ctx);
+    if (until > d.atMs - STOP_MARGIN_MS) {
+      return { reason: d.reason, detail: `quota ${q.provider} ${q.window} resets ${bst(q.resetsAt)}, after ${d.reason} ${bst(d.atMs)}` };
     }
     if (logged !== q.resetsAt) {
       ctx.ledger.log("quota_wait", {
@@ -68,16 +74,24 @@ export async function waitForQuota(ctx: Ctx, first: QuotaResult): Promise<Stop |
     }
     if (ctx.dryRun) return { reason: "quota_wait", detail: q.detail };
     await ctx.clock.sleep(Math.min(QUOTA_RECHECK_MS, until - now));
+    if (target > now) ctx.progressAt = ctx.clock.now();
     q = await checkQuota(ctx);
   }
 }
 
-/** Stop conditions in plan order: stop_time, max_prs, consecutive_failures, then quota (waiting out short windows). */
+/** Deadline, no-progress and run-token safety limits, then max PRs, consecutive failures and quota. */
 export async function checkStop(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number): Promise<Stop | null> {
-  const left = ctx.stopAtMs - ctx.clock.now();
+  const now = ctx.clock.now();
+  const d = deadline(ctx);
+  const left = d.atMs - now;
   if (left <= STOP_MARGIN_MS) {
-    return { reason: "stop_time", detail: `${Math.round(left / 60_000)} min to ${new Date(ctx.stopAtMs).toISOString()}` };
+    return { reason: d.reason, detail: `${Math.round(left / 60_000)} min to ${new Date(d.atMs).toISOString()}` };
   }
+  if (now - ctx.progressAt >= NO_PROGRESS_MS) {
+    return { reason: "safety_cap", detail: `no progress for ${Math.round((now - ctx.progressAt) / 60_000)} min` };
+  }
+  const tokenCap = ctx.run.limits.tokenCap * chunks.length;
+  if (ctx.runTokens > tokenCap) return { reason: "safety_cap", detail: `run tokens ${ctx.runTokens} > ${tokenCap}` };
   const prs = chunks.filter((c) => c.status === "passed" || c.status === "flaky").length;
   if (prs >= ctx.run.maxPrs) return { reason: "max_prs", detail: `${prs} >= ${ctx.run.maxPrs}` };
   if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {

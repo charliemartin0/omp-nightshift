@@ -1,6 +1,9 @@
 export type Status =
   | "pending" | "running" | "passed" | "flaky" | "failed" | "blocked" | "skipped" | "stopped";
 
+export type Need = "browser" | "docker" | "dotnet";
+export const NEEDS: readonly Need[] = ["browser", "docker", "dotnet"];
+
 export interface Chunk {
   id: string;
   status: Status;
@@ -9,6 +12,7 @@ export interface Chunk {
   test: string;
   prodCode: boolean;
   note: string;
+  needs: Need[];
 }
 
 const STATUSES: readonly string[] = [
@@ -66,6 +70,8 @@ export function parseBacklog(md: string): { goal: string; chunks: Chunk[] } {
     let test = f.test;
     if (test.length >= 2 && test.startsWith("`") && test.endsWith("`")) test = test.slice(1, -1).trim();
     if (!test) throw new Error(`backlog: ${s.id}: missing field test`);
+    const needs = [...new Set((f.needs ?? "").split(/[,\s]+/).filter(Boolean))];
+    for (const need of needs) if (!NEEDS.includes(need as Need)) throw new Error(`backlog: ${s.id}: invalid needs ${need}`);
     chunks.push({
       id: s.id,
       status: f.status as Status,
@@ -74,10 +80,20 @@ export function parseBacklog(md: string): { goal: string; chunks: Chunk[] } {
       test,
       prodCode: prod === "yes",
       note: f.note ?? "",
+      needs: needs as Need[],
     });
   }
   if (!chunks.length) throw new Error("backlog: no chunks");
   return { goal, chunks };
+}
+
+/** Explicit tool needs plus obvious test-command requirements. */
+export function chunkNeeds(c: Chunk): Need[] {
+  const needs = new Set(c.needs);
+  if (/\bdotnet\b/.test(c.test)) needs.add("dotnet");
+  if (/\bdocker\b|testcontainers/i.test(c.test)) needs.add("docker");
+  if (/playwright|cypress/i.test(c.test)) needs.add("browser");
+  return [...needs];
 }
 
 export function setChunkStatus(md: string, id: string, status: Status, note: string): string {

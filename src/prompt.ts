@@ -33,10 +33,10 @@ export function renderChunkPrompt(run: RunJson, chunk: Chunk, ctx: PromptCtx): s
   const prod = chunk.prodCode
     ? "Production code changes are allowed only as the chunk scope requires."
     : "Do NOT change production code; only add or fix tests and test fixtures/config.";
-  return `You are running UNATTENDED overnight for Charlie. Nobody will answer questions.
+  return `You are running UNATTENDED overnight for the operator. Nobody will answer questions.
 - Never use the ask tool, never wait for input, never pause for confirmation.
-- Human gate (missing secret/service/tool, another account needed, an ambiguous product decision, a destructive or force-push step):
-  write one line \`BLOCKED: <reason>\` to ${ctx.wt}/.overnight-status and stop immediately. Do not commit that file.
+- Environment problem (a tool, browser, MCP server, service or permission that is missing or fails to start): write one line \`BLOCKED: env: <reason>\` to ${ctx.wt}/.overnight-status and stop immediately. Do not commit that file.
+- Human gate (missing secret, another account, ambiguous product decision, destructive or force-push step): write one line \`BLOCKED: <reason>\` to ${ctx.wt}/.overnight-status and stop immediately. Do not commit that file.
 
 Goal of the night: ${run.goal}
 Your chunk: ${chunk.id}

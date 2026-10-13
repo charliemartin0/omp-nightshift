@@ -2,6 +2,9 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type SpawnResult, spawnGroup } from "./proc";
 
+/** Optional caller-owned deadline budget; existing callers keep the normal subprocess timeouts. */
+export type TimeoutBudget = (timeoutMs: number) => number;
+
 /** git -C <cwd> <args>; never prompts for credentials. */
 export function git(cwd: string, args: string[], o: { timeoutMs?: number; env?: Record<string, string> } = {}): Promise<SpawnResult> {
   return spawnGroup(["git", "-C", cwd, ...args], {
@@ -11,14 +14,14 @@ export function git(cwd: string, args: string[], o: { timeoutMs?: number; env?: 
 }
 
 /** Trimmed stdout of a git command; throws with stderr on failure. */
-export async function gitOut(cwd: string, args: string[]): Promise<string> {
-  const r = await git(cwd, args);
+export async function gitOut(cwd: string, args: string[], budget?: TimeoutBudget): Promise<string> {
+  const r = await git(cwd, args, { timeoutMs: budget?.(120_000) });
   if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.trim() || `exit ${r.code}`}`);
   return r.stdout.trim();
 }
 
-export async function commonDir(repo: string): Promise<string> {
-  return resolve(repo, await gitOut(repo, ["rev-parse", "--git-common-dir"]));
+export async function commonDir(repo: string, budget?: TimeoutBudget): Promise<string> {
+  return resolve(repo, await gitOut(repo, ["rev-parse", "--git-common-dir"], budget));
 }
 
 /** Graphite trunk from .graphite_repo_config, else origin/HEAD, else "main". */
@@ -58,16 +61,16 @@ export function parseRemote(url: string): Remote {
   return { scheme: "other", user: "", host: "", ownerRepo: tail(url) };
 }
 
-export async function originUrl(repo: string, remote: string): Promise<string> {
-  return gitOut(repo, ["remote", "get-url", remote]);
+export async function originUrl(repo: string, remote: string, budget?: TimeoutBudget): Promise<string> {
+  return gitOut(repo, ["remote", "get-url", remote], budget);
 }
 
 /**
  * Base ref for new work. A `local`-forge repo with no such remote has nothing to fetch: use the local trunk branch.
  * Every other case uses `<remote>/<trunk>` (and a missing remote then fails loudly at fetch).
  */
-export async function trunkBase(run: { repo: string; remote: string; trunk: string; forge: string }): Promise<{ ref: string; fetch: boolean }> {
-  if (run.forge === "local" && (await git(run.repo, ["remote", "get-url", run.remote])).code !== 0) return { ref: run.trunk, fetch: false };
+export async function trunkBase(run: { repo: string; remote: string; trunk: string; forge: string }, budget?: TimeoutBudget): Promise<{ ref: string; fetch: boolean }> {
+  if (run.forge === "local" && (await git(run.repo, ["remote", "get-url", run.remote], { timeoutMs: budget?.(120_000) })).code !== 0) return { ref: run.trunk, fetch: false };
   return { ref: `${run.remote}/${run.trunk}`, fetch: true };
 }
 
@@ -90,10 +93,10 @@ export async function pickBranch(repo: string, date: string, id: string): Promis
 }
 
 /** Remove a runner-owned worktree; falls back to deleting the directory when git no longer knows it. */
-export async function removeWorktree(repo: string, wt: string): Promise<void> {
-  const r = await git(repo, ["worktree", "remove", "--force", wt]);
+export async function removeWorktree(repo: string, wt: string, budget?: TimeoutBudget): Promise<void> {
+  const r = await git(repo, ["worktree", "remove", "--force", wt], { timeoutMs: budget?.(120_000) });
   if (r.code !== 0 && existsSync(wt)) {
     rmSync(wt, { recursive: true, force: true });
-    await git(repo, ["worktree", "prune"]);
+    await git(repo, ["worktree", "prune"], { timeoutMs: budget?.(120_000) });
   }
 }

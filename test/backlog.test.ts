@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseBacklog, setChunkStatus } from "../src/backlog";
+import { chunkNeeds, parseBacklog, setChunkStatus } from "../src/backlog";
 
 const md = await Bun.file(new URL("./fixtures/backlog.md", import.meta.url)).text();
 
@@ -43,4 +43,13 @@ test("setChunkStatus inserts missing note after status", () => {
   const out = setChunkStatus(noNote, "login-fix", "passed", "PR #1");
   expect(out).toBe(noNote.replace("- status: pending\n- scope: fix login", "- status: passed\n- note: PR #1\n- scope: fix login"));
   expect(parseBacklog(out).chunks[1].note).toBe("PR #1");
+});
+
+test("explicit needs and test-command heuristics are unioned", () => {
+  const input = md.replace("- test: `npm test -- cart`", "- needs: browser, docker dotnet browser\n- test: `dotnet test X && docker ps && npx playwright test`");
+  const chunk = parseBacklog(input).chunks[0];
+  expect(chunk.needs).toEqual(["browser", "docker", "dotnet"]);
+  expect(chunkNeeds(chunk)).toEqual(["browser", "docker", "dotnet"]);
+  expect(chunkNeeds({ ...chunk, needs: [], test: "dotnet test X && TestContainers && Cypress" })).toEqual(["dotnet", "docker", "browser"]);
+  expect(() => parseBacklog(md.replace("- test: `npm test -- cart`", "- needs: unknown\n- test: t"))).toThrow("backlog: cart-tests: invalid needs unknown");
 });

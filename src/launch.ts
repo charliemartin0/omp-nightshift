@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { parseBacklog } from "./backlog";
+import { parseBacklog, setChunkStatus } from "./backlog";
 import { writeOverlay } from "./overlayfile";
-import { runPreflight } from "./preflight";
+import { chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { type SpawnResult, sleep, spawnGroup } from "./proc";
 import { type RunJson, loadRunJson } from "./runjson";
 
@@ -56,10 +56,11 @@ async function startAndVerify(argv: string[], unit: string): Promise<{ ok: boole
 }
 
 /** Validate, write overlay, run preflight synchronously, then start the detached systemd unit. Exit code. */
-export async function launch(runJsonPath: string, dryRun: boolean, cliPath: string): Promise<number> {
+export async function launch(runJsonPath: string, dryRun: boolean, cliPath: string, retryBlocked = false): Promise<number> {
   const runJson = resolve(runJsonPath);
   const run = loadRunJson(runJson);
-  parseBacklog(readFileSync(join(run.runDir, "backlog.md"), "utf8")); // fail fast on a bad backlog
+  const backlog = join(run.runDir, "backlog.md");
+  let chunks = parseBacklog(readFileSync(backlog, "utf8")).chunks; // fail fast on a bad backlog
 
   // Lock first: a second launch must not run its preflight (which recreates <worktreeRoot>/_preflight)
   // while another run owns this repo.
@@ -69,20 +70,42 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
     console.error(`another overnight run holds ${lock}`);
     return 1;
   }
+  if (retryBlocked) {
+    const blocked = chunks.filter((c) => c.status === "blocked");
+    if (dryRun) console.log(`dry-run: would reset ${blocked.length} blocked chunk(s)`);
+    else if (blocked.length) {
+      let md = readFileSync(backlog, "utf8");
+      for (const c of blocked) md = setChunkStatus(md, c.id, "pending", `retry: ${c.note}`);
+      writeFileSync(`${backlog}.tmp`, md);
+      renameSync(`${backlog}.tmp`, backlog);
+      chunks = parseBacklog(md).chunks;
+    }
+  }
 
   console.log(`overlay: ${(await writeOverlay(run)).path}`);
   const checks = await runPreflight(run, {
     ledger: null,
     logFile: join(run.runDir, "logs", "preflight.log"),
-    onResult: (c) => console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`),
+    ...preflightRequirements(chunks),
+    onResult: (c) => {
+      if (!c.ok && c.need) {
+        const ids = chunksBlockedBy(chunks, [c]).map((b) => b.id);
+        console.log(`WARN ${c.name}: ${c.detail} — chunks needing ${c.need} will be blocked: ${ids.join(", ")}`);
+      } else console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`);
+    },
   });
-  if (checks.some((c) => !c.ok)) return 1;
+  if (checks.some((c) => !c.ok && !c.need)) return 1;
 
   let res = await startAndVerify(systemdRunArgv(run, lock, "sleep:idle:handle-lid-switch", runJson, cliPath, dryRun), run.unit);
   if (!res.ok && res.denied) {
     await sh(["systemctl", "--user", "reset-failed", run.unit]);
     console.log(LID_WARNING);
     res = await startAndVerify(systemdRunArgv(run, lock, "sleep:idle", runJson, cliPath, dryRun), run.unit);
+    if (!res.ok && res.denied) {
+      await sh(["systemctl", "--user", "reset-failed", run.unit]);
+      console.log("WARNING: polkit denied the sleep inhibitor; holding an idle-only inhibitor (keep the host awake)");
+      res = await startAndVerify(systemdRunArgv(run, lock, "idle", runJson, cliPath, dryRun), run.unit);
+    }
   }
   if (!res.ok) {
     console.error(res.message);

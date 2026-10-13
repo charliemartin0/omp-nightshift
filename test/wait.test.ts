@@ -30,7 +30,9 @@ function setup(opts: { stopAtMs?: number } = {}) {
       state.t += ms;
     },
   };
-  ctx.stopAtMs = opts.stopAtMs ?? START + 12 * HOUR;
+  ctx.stopAtMs = opts.stopAtMs ?? null;
+  ctx.capAtMs = START + 12 * HOUR;
+  ctx.progressAt = START;
   ctx.buildProviders = chain;
   return { ctx, state, dir };
 }
@@ -76,11 +78,11 @@ test("waits out a 5h window then proceeds", async () => {
   expect(waits[0].message).toMatch(/BST|GMT/);
 });
 
-test("reset after stop time -> stop_time without sleeping", async () => {
+test("reset after stop override -> stopAt without sleeping", async () => {
   const { ctx, state } = setup({ stopAtMs: START + 2 * HOUR });
   queued(state, ctx, [exhausted(START + 5 * HOUR)]);
   const stop = await checkStop(ctx, [], 0);
-  expect(stop?.reason).toBe("stop_time");
+  expect(stop?.reason).toBe("stopAt");
   expect(state.sleeps).toEqual([]);
 });
 
@@ -109,7 +111,7 @@ test("runner re-queues quota deaths without counting failures", async () => {
     return { status, note: "x", branch: `br-${calls.length}`, ...(requeue ? { requeue: true } : {}) } as any;
   };
   const stop = await loop(ctx, [], fake as any);
-  expect(stop.reason).toBe("backlog_exhausted");
+  expect(stop.reason).toBe("finished");
   expect(calls).toEqual(["a", "a", "a", "b"]);
   const statuses = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks.map((c) => c.status);
   expect(statuses).toEqual(["passed", "passed"]);

@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { readFileSync } from "node:fs";
+import { parseBacklog } from "./backlog";
+import { estimateText, loadHistory } from "./estimate";
 import { launch } from "./launch";
 import { resolveTrunk } from "./git";
 import { errMsg, shutdown } from "./proc";
@@ -8,11 +11,12 @@ import { resolveRepo, statusText, stopRun } from "./status";
 const USAGE = `omp-overnight: unattended overnight runner
 
 Usage: bun cli.ts <command>
-  launch <run.json> [--dry-run]   validate, preflight, start the systemd user unit
+  launch <run.json> [--dry-run] [--retry-blocked]   validate, preflight, start the systemd user unit
   run <run.json> [--dry-run]      runner body (started by systemd; --dry-run never starts an omp session)
   status [--repo <path>]          latest run: unit state, chunks, ledger tail, worktrees, report
   stop [--repo <path>]            stop the unit (worktrees, branches and PRs are left alone), then status
   trunk [--repo <path>]           print the trunk branch (Graphite config, origin/HEAD, else main)
+  estimate <backlog.md>           pending-chunk finish estimate and recommended safety cap
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -23,6 +27,7 @@ function flag(args: string[], name: string): string | undefined {
 async function main(args: string[]): Promise<number> {
   const [cmd, ...rest] = args;
   const dryRun = rest.includes("--dry-run");
+  if (rest.includes("--retry-blocked") && cmd !== "launch") throw new Error("--retry-blocked is only valid for launch");
   const positional = rest.find((a) => !a.startsWith("--"));
   switch (cmd) {
     case "launch":
@@ -30,8 +35,12 @@ async function main(args: string[]): Promise<number> {
       if (!positional) throw new Error(`${cmd}: missing <run.json>`);
       if (cmd === "run") return runMain(positional, dryRun);
       process.on("SIGINT", () => void shutdown().then(() => process.exit(130)));
-      return launch(positional, dryRun, import.meta.path);
+      return launch(positional, dryRun, import.meta.path, rest.includes("--retry-blocked"));
     }
+    case "estimate":
+      if (!positional) throw new Error("estimate: missing <backlog.md>");
+      console.log(estimateText(loadHistory(), parseBacklog(readFileSync(positional, "utf8")).chunks.filter((c) => c.status === "pending").map((c) => c.id), Date.now()));
+      return 0;
     case "status":
       console.log(await statusText(await resolveRepo(flag(rest, "--repo"))));
       return 0;

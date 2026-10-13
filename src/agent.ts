@@ -1,6 +1,6 @@
 import { closeSync, existsSync, readdirSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import type { Ctx } from "./ctx";
+import { type Ctx, deadline } from "./ctx";
 import { openAppend, readLines, settle, startGroup } from "./proc";
 import { parseDuration } from "./runjson";
 import { QUOTA_ERROR_RE, type Trip, Watchdog } from "./watchdog";
@@ -81,13 +81,13 @@ export async function runOmp(
   const { limits } = ctx.run;
   const maxTime = o.mode.kind === "initial" ? limits.maxTime : limits.resumeMaxTime;
   const t0 = Date.now();
-  const hardMs = Math.min(parseDuration(maxTime) + HARD_SLACK_MS, ctx.stopAtMs - t0);
+  const hardMs = Math.min(parseDuration(maxTime) + HARD_SLACK_MS, deadline(ctx).atMs - t0);
   if (o.tokensUsed >= limits.tokenCap) {
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "token_cap", tokens: o.tokensUsed, detail: "cap already spent; omp not started" });
     return { code: -1, trip: "token_cap", tokens: o.tokensUsed, sessionId: null, quotaError: null };
   }
   if (hardMs <= 0) {
-    ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "timeout", tokens: o.tokensUsed, detail: "past stop time; omp not started" });
+    ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "timeout", tokens: o.tokensUsed, detail: `past ${deadline(ctx).reason} deadline; omp not started` });
     return { code: -1, trip: "timeout", tokens: o.tokensUsed, sessionId: null, quotaError: null };
   }
   const wd = new Watchdog({
@@ -136,6 +136,7 @@ export async function runOmp(
   clearInterval(tick);
   closeSync(out);
   closeSync(err);
+  ctx.runTokens += wd.tokens - o.tokensUsed;
   // omp may exit between ticks with the cap already spent: never let that reach the gate/fix-resume path.
   if (!trip && wd.tokens >= limits.tokenCap) {
     trip = "token_cap";
