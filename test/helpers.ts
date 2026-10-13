@@ -6,6 +6,9 @@ import { type Ctx, makeCtx } from "../src/ctx";
 import { validateRunJson } from "../src/runjson";
 import usage from "./fixtures/usage.json";
 
+// Tests must never reach for the real Windows host (powershell.exe / schtasks.exe) when run under WSL.
+process.env.OMP_NIGHTSHIFT_WINDOWS = "off";
+
 export const START = Date.parse("2026-07-01T00:00:00Z");
 export const HOUR = 3_600_000;
 const dirs: string[] = [];

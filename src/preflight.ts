@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { type Chunk, type Need, chunkNeeds } from "./backlog";
 import { type Clock, oneLine } from "./ctx";
 import { type TimeoutBudget, commonDir, git, originUrl, parseRemote, removeWorktree, trunkBase } from "./git";
+import { windowsSleep, windowsTools } from "./keepawake";
 import type { Ledger } from "./ledger";
 import { errMsg, readLines, sleep, spawnGroup, startGroup } from "./proc";
 import type { RunJson } from "./runjson";
@@ -11,6 +12,8 @@ import type { RunJson } from "./runjson";
 export interface Check {
   name: string;
   ok: boolean;
+  /** Passed, but worth the operator's attention; never blocks the launch or the run. */
+  warn?: boolean;
   detail: string;
   need?: Need;
 }
@@ -214,12 +217,14 @@ export async function runPreflight(run: RunJson, o: PreflightOptions): Promise<C
   };
   const add = (c: Check) => {
     results.push(c);
-    o.ledger?.log("preflight", { name: c.name, ok: c.ok, detail: c.detail, ...(c.need ? { need: c.need } : {}) });
+    o.ledger?.log("preflight", { name: c.name, ok: c.ok, ...(c.warn ? { warn: true } : {}), detail: c.detail, ...(c.need ? { need: c.need } : {}) });
     o.onResult?.(c);
   };
   if (!o.recheck) {
     add(await evaluate("power", power));
     add(await evaluate("git_clean", () => gitClean(run)));
+    const win = windowsTools();
+    if (win) add(await evaluate("windows_sleep", () => windowsSleep(win)));
   }
   add(await evaluate("forge_auth", () => forgeAuth(run, budget)));
   if (o.needs.includes("docker")) add(await evaluate("docker", () => docker(budget), "docker"));
