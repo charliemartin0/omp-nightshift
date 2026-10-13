@@ -36,7 +36,12 @@ export interface AgentTuning {
 
 export type OmpMode =
   | { kind: "initial"; promptFile: string }
-  | { kind: "resume"; session: string; message: string };
+  | { kind: "resume"; session: string; message: string }
+  /** resume whose saved model omp could not restore: same message and build model, new session */
+  | { kind: "fresh"; message: string };
+
+/** omp (18.6.3+) refuses `-r` in print/json mode when the session's saved model is gone. */
+export const MODEL_RESTORE_RE = /Could not restore model/i;
 
 export function sessionsDir(ctx: Ctx, chunkId: string): string {
   return join(ctx.sessions, chunkId);
@@ -51,6 +56,12 @@ export function ompArgv(ctx: Ctx, chunkId: string, wt: string, mode: OmpMode): s
       "omp", "-p", "--mode", "json", "--model", models.plan, "--plan-yolo", "--plan-yolo-into", models.build,
       "--max-time", limits.maxTime, "--config", ctx.overlay, "--session-dir", sessionDir, "--cwd", wt,
       "--no-title", `@${mode.promptFile}`,
+    ];
+  }
+  if (mode.kind === "fresh") {
+    return [
+      "omp", "-p", "--mode", "json", "--model", models.build, "--session-dir", sessionDir,
+      "--max-time", limits.resumeMaxTime, "--config", ctx.overlay, "--cwd", wt, "--no-title", mode.message,
     ];
   }
   return [
@@ -122,6 +133,7 @@ export async function runOmp(
   const g = startGroup(ompArgv(ctx, o.chunk, o.wt, o.mode), { cwd: o.wt });
 
   let trip: Trip | null = null;
+  let restoreFailed = false;
   let suspendMs = 0;
   let lastMtime = newestMtime(dir);
   const gaps = new GapDetector(t0, tickMs, o.tuning?.gapThresholdMs ?? SUSPEND_GAP_MS);
@@ -154,11 +166,15 @@ export async function runOmp(
     (async () => {
       for await (const line of readLines(g.stdout)) {
         writeSync(out, `${line}\n`);
+        if (MODEL_RESTORE_RE.test(line)) restoreFailed = true;
         wd.onLine(line, now());
       }
     })(),
     (async () => {
-      for await (const line of readLines(g.stderr)) writeSync(err, `${line}\n`);
+      for await (const line of readLines(g.stderr)) {
+        writeSync(err, `${line}\n`);
+        if (MODEL_RESTORE_RE.test(line)) restoreFailed = true;
+      }
     })(),
   ]);
   const code = await g.exited;
@@ -174,6 +190,13 @@ export async function runOmp(
   if (!trip && wd.tokens >= limits.tokenCap) {
     trip = "token_cap";
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip, tokens: wd.tokens });
+  }
+  if (o.mode.kind === "resume" && code !== 0 && !trip && restoreFailed) {
+    ctx.ledger.log("warning", {
+      chunk: o.chunk, kind: "model_restore",
+      detail: `omp could not restore the saved model of session ${o.mode.session}; starting a fresh session with the same message`,
+    });
+    return runOmp(ctx, { ...o, n: o.n + 1, mode: { kind: "fresh", message: o.mode.message }, tokensUsed: wd.tokens });
   }
   const quotaError = wd.lastError !== null && QUOTA_ERROR_RE.test(wd.lastError) ? wd.lastError : null;
   ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError, swept: swept.found });

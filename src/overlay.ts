@@ -16,8 +16,21 @@ export function assertNoFreeModels(models: Record<string, string>, roles: Record
   }
 }
 
-/** Overlay YAML: the live modelRoles and fallbackChains verbatim, usageReservePct from the run. */
-export function buildOverlay(roles: Record<string, string>, allChains: Record<string, string[]>, reservePct: number): string {
+/** Values omp accepts for `retry.fallbackOn`. */
+export const FALLBACK_ON = ["any", "usage-limit", "except-usage-limit"] as const;
+export type FallbackOn = (typeof FALLBACK_ON)[number];
+export const isFallbackOn = (v: unknown): v is FallbackOn => typeof v === "string" && (FALLBACK_ON as readonly string[]).includes(v);
+
+/**
+ * Overlay YAML: the live modelRoles and fallbackChains verbatim, usageReservePct from the run, and the live
+ * `retry.fallbackOn` when set (otherwise omp's default applies).
+ */
+export function buildOverlay(
+  roles: Record<string, string>,
+  allChains: Record<string, string[]>,
+  reservePct: number,
+  fallbackOn?: FallbackOn,
+): string {
   const chains = withoutFreeModels(allChains);
   const lines: string[] = ["modelRoles:"];
   for (const [k, v] of Object.entries(roles)) lines.push(`  ${q(k)}: ${q(v)}`);
@@ -28,6 +41,7 @@ export function buildOverlay(roles: Record<string, string>, allChains: Record<st
     `  usageReservePct: ${reservePct}`,
     "  waitForUsageReset: false",
   );
+  if (fallbackOn) lines.push(`  fallbackOn: ${q(fallbackOn)}`);
   const keys = Object.keys(chains);
   if (keys.length === 0) lines.push("  fallbackChains: {}");
   else {
