@@ -15,8 +15,12 @@ import { selfReview } from "./review";
 import { loadRunJson } from "./runjson";
 import { type Stop, checkStop, IDENTICAL_FAILURE_LIMIT, STOP_MARGIN_MS } from "./stops";
 
-/** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
-export const MAX_QUOTA_REQUEUES = 3;
+/**
+ * A chunk killed by a quota error returns to pending at most this many times, with a growing pause, before it is marked
+ * failed. Quota deaths never count towards the consecutive-failure stop: quota is a reason to wait, not to stop.
+ */
+export const MAX_QUOTA_REQUEUES = 6;
+export const requeueBackoffMs = (n: number): number => Math.min(10 * 60_000, 60_000 * 2 ** (n - 1));
 
 /** Refresh the finish estimate while keeping the launch's fixed safety cap. */
 export function logEstimate(ctx: Ctx): void {
@@ -86,10 +90,11 @@ export async function loop(
       requeues.set(next.id, n);
       if (n < MAX_QUOTA_REQUEUES) {
         seen.delete(next.id);
+        ctx.ledger.log("quota_requeue", { chunk: next.id, attempt: n, backoffSec: requeueBackoffMs(n) / 1000 });
+        await ctx.clock.sleep(requeueBackoffMs(n)); // usage may look healthy while the provider still refuses: do not spin
         continue;
       }
       ctx.setStatus(next.id, "failed", `quota error ${n}x: ${out.note}`);
-      failures++;
       continue;
     }
     if (out.status === "failed") {

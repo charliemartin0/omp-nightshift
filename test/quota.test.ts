@@ -17,20 +17,23 @@ test("anthropic under its floor while openai-codex is usable -> ok", () => {
   expect(ev(u)).toEqual({ ok: true });
 });
 
-test("every chain provider under its floor -> quota_floor listing each", () => {
+test("every chain provider under its floor -> quota_wait on the earliest 7d reset", () => {
   const u = clone();
   lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
   lim(u, "openai-codex", "7d").amount.remainingFraction = 0.4;
   expect(ev(u, floors, ["anthropic", "openai-codex"])).toEqual({
     ok: false,
-    reason: "quota_floor",
-    detail: "build chain unusable: anthropic 7d 0.20 < 0.25, openai-codex 7d 0.40 < 0.50",
+    reason: "quota_wait",
+    provider: "anthropic",
+    window: "7d",
+    resetsAt: lim(u, "anthropic", "7d").window.resetsAt,
+    detail: `build chain unusable; anthropic 7d resets ${new Date(lim(u, "anthropic", "7d").window.resetsAt).toISOString()}`,
   });
 });
 
 test("anthropic under floor, openai 5h exhausted -> quota_wait on openai reset", () => {
   const u = clone();
-  const reset = Date.parse("2026-10-08T17:12:00Z");
+  const reset = Date.parse("2026-10-08T15:12:00Z"); // before anthropic's own 7d reset (16:00Z), so openai recovers first
   lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
   lim(u, "openai-codex", "5h").amount.remainingFraction = 0;
   lim(u, "openai-codex", "5h").window.resetsAt = reset;
@@ -45,10 +48,13 @@ test("providers outside the chain never stop the run", () => {
   expect(ev(u, floors, ["openai-codex"])).toEqual({ ok: true });
 });
 
-test("no chain: floors are hard stops; missing report is unknown", () => {
+test("no chain: a floor breach waits for the 7d reset; a missing report is unknown", () => {
   const u = clone();
   lim(u, "anthropic", "7d").amount.remainingFraction = 0.2;
-  expect(ev(u, floors, [])).toEqual({ ok: false, reason: "quota_floor", detail: "anthropic 7d 0.20 < 0.25" });
+  expect(ev(u, floors, [])).toEqual({
+    ok: false, reason: "quota_wait", provider: "anthropic", window: "7d",
+    resetsAt: lim(u, "anthropic", "7d").window.resetsAt, detail: "anthropic 7d 0.20 < 0.25",
+  });
   const r = ev(null, floors, []);
   expect(r.ok === false && r.reason).toBe("quota_unknown");
 });
@@ -92,13 +98,31 @@ test("provider absent from usage is usable", () => {
   expect(ev(u)).toEqual({ ok: true });
 });
 
-test("chain blocked only by 7d windows -> limit_reached (no wait)", () => {
+test("chain blocked only by 7d windows -> quota_wait on the earliest 7d reset, never a stop", () => {
   const u = clone();
   lim(u, "anthropic", "7d").amount.remainingFraction = 0.3;
   lim(u, "openai-codex", "7d").amount.remainingFraction = 0.3;
-  // 7d at 0.3 <= reserve 0.4 blocks the chain and cannot recover on its own
-  const r = ev(u, {}, ["anthropic", "openai-codex"]);
-  expect(r.ok === false && r.reason).toBe("quota_limit_reached");
+  // 7d at 0.3 <= reserve 0.4 blocks the chain until the weekly reset
+  expect(ev(u, {}, ["anthropic", "openai-codex"])).toMatchObject({
+    ok: false, reason: "quota_wait", provider: "anthropic", window: "7d", resetsAt: lim(u, "anthropic", "7d").window.resetsAt,
+  });
+});
+
+test("blocked chain whose windows report no reset time -> quota_wait with resetsAt null", () => {
+  const u = clone();
+  for (const p of ["anthropic", "openai-codex"]) {
+    rep(u, p).metadata.limitReached = true;
+    for (const l of rep(u, p).limits) { l.amount.remainingFraction = 0; l.window.resetsAt = null; }
+  }
+  expect(ev(u, {}, ["anthropic", "openai-codex"])).toMatchObject({ ok: false, reason: "quota_wait", resetsAt: null, window: "unknown" });
+});
+
+test("evaluateQuota never returns a stop reason for an unusable chain", () => {
+  const u = clone();
+  for (const r of u.reports) for (const l of r.limits) l.amount.remainingFraction = 0;
+  for (const r of u.reports) r.metadata = { ...(r.metadata ?? {}), limitReached: true };
+  const r = ev(u);
+  expect(r.ok === false && r.reason).toBe("quota_wait");
 });
 
 test("empty chain skips chain check", () => {

@@ -77,12 +77,19 @@ Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk
 `~/.omp/overnight/<repoName>/lock`.
 
 ## Quota
-A provider under its 7d floor (or 7d-exhausted) is unusable but does not stop the run while another provider in the
-build role's fallback chain is usable. A chain provider is also unusable when `limitReached` or below the reserve
-(`reservePct`, default 40) on any window. When every chain provider is unusable and one recovers on a short window,
-the runner logs `quota_wait`, sleeps until the earliest reset + 2 min (re-checking every 10 min), and never past the
-effective deadline (the earlier of the safety cap and optional `stopAt` override). If none can recover (7d only) the run stops with `quota_floor` / `quota_limit_reached`. A
-chunk killed by a quota/429 error returns to `pending` (at most 3 times) without counting as a failure.
+Quota never stops a run: it waits. A provider under its 7d floor (default 7d floors are Anthropic 20%, OpenAI 40%,
+others 20%) or 7d-exhausted is unusable but the run carries on while another provider in the build role's fallback
+chain is usable. A chain provider is also unusable when `limitReached` or below the reserve (`reservePct`, default 40)
+on any window. When every chain provider is unusable, the runner logs `quota_wait` and sleeps until the earliest reset
+of any of them, 7d windows included, plus 2 min (re-checking every 10 min). Waiting for a known future reset counts as
+progress and does not use up the safety cap (the cap is extended by the time slept); an explicit `stopAt` override is
+wall-clock and still ends the run. A window with no reset time, or usage that stays stale after a reset, is re-checked
+every 10 min and bounded by the safety cap and the 60 min no-progress limit. Only unreadable usage with no chain
+(`quota_unknown`) is a stop. A chunk killed by a quota/429 error returns to `pending` (at most 6 times, pausing 1, 2,
+4... up to 10 min between attempts) without counting as a failure, even when the attempts run out.
+
+Free-tier models (`...-free`, `...:free`) are never used, not even as a fallback: they are dropped from every chain in
+the generated overlay and from the quota chain, and `launch` rejects a run whose `models` resolve to one.
 
 ## Stop and safety cap
 
@@ -96,7 +103,7 @@ outcome. Type samples need at least three runs; otherwise the estimate uses pool
 The run stops within 20 min of the effective deadline with `safety_cap` or `stopAt`. It also stops with
 `safety_cap` after 60 min without a chunk finishing or a real future-reset quota sleep (stale reset rechecks
 are not progress), after three identical normalised failure notes (chunk ids/digits removed), or when run
-tokens exceed `tokenCap × chunk count`. Existing max-PR, consecutive-failure and quota limits still apply.
+tokens exceed `tokenCap × chunk count`. Existing max-PR and consecutive-failure limits still apply; quota never stops a run (see Quota).
 `status` shows the latest stop reason, finish estimate, safety cap and optional override.
 
 ## Host suspend
