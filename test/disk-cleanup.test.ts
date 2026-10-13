@@ -175,6 +175,21 @@ test("reclaimChunkOutput logs exactly one disk_cleanup event (the helper runChun
   expect(events[0]).toMatchObject({ chunk: "chunk", wt: f.wt, reclaimedBytes: 4, removedFiles: 1, refused: [] });
 });
 
+test("reclaimChunkOutput bounds the recorded refusals and still counts them all", async () => {
+  const f = await fixture();
+  mkdirSync(join(f.wt, "node_modules"), { recursive: true });
+  for (let i = 0; i < 25; i++) symlinkSync(join(f.wt, "node_modules"), join(f.wt, "node_modules", `link-${i}`));
+  const { ctx } = setup();
+  ctx.run.worktreeRoot = f.root;
+  await reclaimChunkOutput(ctx, "chunk", f.wt);
+  const [event] = entries(ctx).filter((e) => e.event === "disk_cleanup");
+  expect(event.refusedCount).toBe(25);
+  expect((event.refused as string[]).length).toBe(20);
+  expect(event.reclaimedBytes).toBe(0);
+  expect(event.removedFiles).toBe(0);
+  expect(existsSync(join(f.wt, "node_modules"))).toBe(true);
+});
+
 test("reclaimChunkOutput skips everything in dry-run, leaving outputs for the runner to remove", async () => {
   const f = await fixture();
   mkdirSync(join(f.wt, "dist"));

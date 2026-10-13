@@ -196,8 +196,8 @@ When a chunk ends terminally (its PR delivered, or the chunk failed/blocked/skip
 build outputs: `node_modules`, `bin`, `obj`, `dist`, `test-results`, `playwright-report`, `.turbo` and `coverage`
 at any depth. Only untracked files are removed, tracked files and their directories survive, and the cleanup
 refuses paths outside the worktree, symlinks, and any worktree it does not own. One `disk_cleanup` ledger event
-reports reclaimed bytes (logical sizes), removed file count and refusals. The worktree and branch themselves are
-kept, and requeued chunks keep their outputs.
+reports reclaimed bytes (logical sizes), removed file count, how many paths were refused and the first 20 refusal
+reasons. The worktree and branch themselves are kept, and requeued chunks keep their outputs.
 
 ## Blocked chunks
 

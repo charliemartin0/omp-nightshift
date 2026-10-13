@@ -228,8 +228,12 @@ export async function loop(
       if (!first) {
         // A disk poll tick re-measures here: fill() can return before the gate (held dispatch, no unseen pending
         // chunk, held-back outcomes), and re-arming an already-elapsed timer would spin at tick cadence.
-        const gate = await diskGate();
-        if (gate && gate !== "wait") stop ??= gate;
+        try {
+          const gate = await diskGate();
+          if (gate && gate !== "wait") stop ??= gate;
+        } catch (cause) {
+          error = { cause }; // same handling as a fill() failure: drain in-flight chunks, then rethrow
+        }
         continue;
       }
       const done = first;
