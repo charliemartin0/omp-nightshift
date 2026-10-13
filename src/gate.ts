@@ -4,6 +4,7 @@ import type { Chunk } from "./backlog";
 import type { Ctx } from "./ctx";
 import { git } from "./git";
 import { spawnGroup } from "./proc";
+import { type EnvSignature, type Recovery, classifyEnvFailure, envSummary, freeOwnPorts } from "./envfail";
 import { sweepLogger } from "./sweep";
 
 export const TEST_RUNS = 3;
@@ -61,6 +62,8 @@ export interface GateResult {
   ok: boolean;
   flaky: boolean;
   failures: string[];
+  /** set when the tests were the only failing check and every failed run was environmental (after the one clean retry) */
+  env?: string;
   /** PR / branch description for the backlog note (only meaningful when ok) */
   note: string;
 }
@@ -135,16 +138,25 @@ async function checkCommit(g: GateInput): Promise<Check> {
     : { ok: false, detail: `no new commit since ${g.startSha.slice(0, 7)}` };
 }
 
-/** Three runs of the chunk's test command: 3/3 pass, 2/3 pass flaky, else fail. */
-async function checkTests(g: GateInput): Promise<Check & { passes: number; flakyTests?: FlakyTest[]; failedRun?: number }> {
+type TestsCheck = Check & { passes: number; flakyTests?: FlakyTest[]; failedRun?: number; env?: string; envRetry?: EnvRetry };
+interface EnvRetry {
+  signature: string;
+  freed: Recovery["freed"];
+  foreign: Recovery["foreign"];
+}
+
+/** One attempt: three runs of the chunk's test command: 3/3 pass, 2/3 pass flaky, else fail. */
+async function runTestsOnce(g: GateInput, attempt: number): Promise<TestsCheck & { signatures: EnvSignature[] }> {
   const { ctx, chunk } = g;
   let passes = 0;
   let lastFail = "";
   let failedLog = "";
   let failedOffset = 0;
   let failedRun = 0;
+  const failedRuns: { signature: EnvSignature | null }[] = [];
   for (let k = 1; k <= TEST_RUNS; k++) {
-    const logFile = join(ctx.logs, `${chunk.id}-test-${k}.log`);
+    // the first attempt keeps the documented name; an env retry logs next to it so the evidence is not mixed
+    const logFile = join(ctx.logs, `${chunk.id}-test-${attempt > 1 ? `env${attempt}-` : ""}${k}.log`);
     const offset = existsSync(logFile) ? statSync(logFile).size : 0;
     const r = await spawnGroup(["bash", "-lc", chunk.test], {
       cwd: g.wt,
@@ -160,12 +172,36 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
       failedLog = logFile;
       failedOffset = offset;
       failedRun = k;
+      // drop spawnGroup's `$ argv` header: the test command's own text must never look like evidence
+      failedRuns.push({ signature: r.timedOut ? null : classifyEnvFailure(readSince(logFile, offset).replace(/^\$ [^\n]*\n/, ""), r.code) });
       lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
     }
   }
-  if (passes === TEST_RUNS) return { ok: true, passes, detail: `tests ${passes}/${TEST_RUNS}` };
-  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readSince(failedLog, failedOffset)), failedRun };
-  return { ok: false, passes, detail: `tests ${passes}/${TEST_RUNS} (${chunk.test})\n${lastFail}` };
+  const signatures = failedRuns.flatMap((f) => (f.signature ? [f.signature] : []));
+  if (passes === TEST_RUNS) return { ok: true, passes, detail: `tests ${passes}/${TEST_RUNS}`, signatures };
+  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readSince(failedLog, failedOffset)), failedRun, signatures };
+  // environmental only when EVERY failed run carries an environment signature
+  const env = signatures.length === failedRuns.length && signatures.length > 0 ? signatures : [];
+  return { ok: false, passes, detail: `tests ${passes}/${TEST_RUNS} (${chunk.test})\n${lastFail}`, signatures: env, ...(env.length ? { env: envSummary(env) } : {}) };
+}
+
+/**
+ * Three test runs. When all of them fail with an environmental signature (port in use, OOM, ...), the gate cleans up
+ * (stops this run's own leftover listeners) and runs the whole attempt once more, spending no agent tokens. A second
+ * environmental failure is reported as `env` so the chunk is blocked as an environment problem, not fix-resumed.
+ */
+async function checkTests(g: GateInput): Promise<TestsCheck> {
+  const strip = ({ signatures: _drop, ...rest }: TestsCheck & { signatures: EnvSignature[] }): TestsCheck => rest;
+  const first = await runTestsOnce(g, 1);
+  if (first.ok || !first.env || !first.signatures.some((s) => s.retryable)) return strip(first);
+  const ports = [...new Set(first.signatures.flatMap((s) => s.ports))];
+  const rec = ports.length ? await freeOwnPorts(ports, g.ctx.run.worktreeRoot) : { freed: [], foreign: [] };
+  await g.ctx.clock.sleep(2_000); // let the OS release the sockets
+  const retry: EnvRetry = { signature: first.env, ...rec };
+  g.ctx.ledger.log("gate_env_retry", { chunk: g.chunk.id, ...retry });
+  const second = await runTestsOnce(g, 2);
+  const note = `env retry after ${first.env}${rec.freed.length ? `; stopped ${rec.freed.length} stale listener(s)` : ""}${rec.foreign.length ? `; ${rec.foreign.length} listener(s) belong to something else and were left alone` : ""}`;
+  return { ...strip(second), envRetry: retry, detail: `${second.detail}\n(${note})` };
 }
 
 async function viewPr(g: GateInput): Promise<{ pr: Pr | null; error: string }> {
@@ -212,6 +248,8 @@ export async function runGate(g: GateInput): Promise<GateResult> {
 
   const failures = Object.values(checks).filter((c) => !c.ok).map((c) => c.detail);
   const flaky = tests.ok && tests.passes < TEST_RUNS;
+  const onlyTests = Object.entries(checks).every(([name, c]) => c.ok || name === "tests");
+  const env = !tests.ok && onlyTests ? tests.env : undefined;
   const ok = failures.length === 0;
   let prBodyUpdated: boolean | undefined;
   if (ok && flaky && pr?.pr && tests.flakyTests && tests.failedRun) {
@@ -231,5 +269,5 @@ export async function runGate(g: GateInput): Promise<GateResult> {
   const extras = [flaky ? `flaky ${tests.passes}/${TEST_RUNS}` : "", pr?.redrafted ? "redrafted" : ""].filter(Boolean);
   const note = extras.length ? `${where} (${extras.join(", ")})` : where;
   g.ctx.ledger.log("gate", { chunk: g.chunk.id, ok, flaky, checks, ...(tests.flakyTests ? { flakyTests: tests.flakyTests } : {}), ...(prBodyUpdated !== undefined ? { prBodyUpdated } : {}) });
-  return { ok, flaky, failures, note };
+  return { ok, flaky, failures, ...(env ? { env } : {}), note };
 }

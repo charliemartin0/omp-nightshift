@@ -157,6 +157,9 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
 
   const gateInput = { ctx, chunk, wt, branch: plan.branch, startSha, prBase: plan.prBase, slug };
   let gate = await runGate(gateInput);
+  // The machine, not the code, failed the tests (even after the gate's own clean re-run): no agent tokens are spent on it.
+  const envBlock = (): Outcome => ({ status: "blocked", note: `env: gate tests: ${gate.env}; branch ${plan.branch} is committed, work is intact` });
+  if (!gate.ok && gate.env) return envBlock();
   if (!gate.ok) {
     const q = await checkQuota(ctx);
     if (!q.ok && q.reason === "quota_wait") {
@@ -172,6 +175,7 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
     blocked = readBlocked(wt);
     if (blocked) return { status: "blocked", note: blocked };
     gate = await runGate(gateInput);
+    if (!gate.ok && gate.env) return envBlock();
     if (!gate.ok) return fail(`gate failed: ${gate.failures.map((f) => f.split("\n")[0]).join("; ")}`);
   }
   return { status: gate.flaky ? "flaky" : "passed", note: gate.note };

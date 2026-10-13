@@ -70,7 +70,7 @@ Stop a run with `/skill:overnight stop`; it leaves real worktrees, branches, and
 - `ledger.jsonl` (`ledger.dry-run.jsonl`), `report.md` (`report.dry-run.md`), `report.md.bak` (`report.dry-run.md.bak`)
 - `prompts/<id>.md`, `prompts/report.md`, `prompts/<id>-review.md`
 - `sessions/<id>/` omp session dirs
-- `logs/<id>-omp-<n>.jsonl` raw stream, `logs/<id>-setup.log`, `logs/<id>-test-<k>.log`, `logs/preflight.log`
+- `logs/<id>-omp-<n>.jsonl` raw stream, `logs/<id>-setup.log`, `logs/<id>-test-<k>.log` (`-test-env2-<k>` after a gate environment retry), `logs/preflight.log`
 - `logs/<id>-pr-body.md`, `logs/<id>-review.log`, `reviews/<id>.md`
 
 Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk-id>`; the run lock is
@@ -158,6 +158,19 @@ note. Each failing need check gets one retry after 15 s; no browsers are install
 services configured or MCP config edited. Environment rechecks skip power/git-clean checks.
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
+
+## Gate environment retry
+
+Each gate runs the chunk test three times. When every failed run carries an environmental signature (a port already
+in use such as `EADDRINUSE` or Playwright's "http://localhost:9999 is already used", `ENOSPC`, an out-of-memory kill or
+exit 137), the gate does not wake the agent. It stops listeners on the named ports only when their working directory is
+inside this run's `worktreeRoot` (its own leftover dev servers; anything else is reported and left alone), waits 2 s and
+re-runs the three tests once. Evidence is logged as `gate_env_retry {signature, freed, foreign}`; the retry's logs are
+`logs/<id>-test-env2-<k>.log` next to the first attempt's `logs/<id>-test-<k>.log`. If the retry still fails
+environmentally, and the tests were the only failing check, the chunk is `blocked` with an `env: gate tests: ...` note
+(its branch stays committed) so it joins the normal environment retry instead of burning fix-resume tokens or inviting
+test-config hacks such as `reuseExistingServer: true`. A real test failure, a mix of environmental and real failures,
+or a timeout is never retried this way. `disk_full` is classified as environmental but not retried.
 
 ## Blocked chunks
 
