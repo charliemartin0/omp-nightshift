@@ -1,16 +1,28 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type SpawnResult, spawnGroup } from "./proc";
+import { withRepoLock } from "./repolock";
 
 /** Optional caller-owned deadline budget; existing callers keep the normal subprocess timeouts. */
 export type TimeoutBudget = (timeoutMs: number) => number;
 
 /** git -C <cwd> <args>; never prompts for credentials. */
 export function git(cwd: string, args: string[], o: { timeoutMs?: number; env?: Record<string, string> } = {}): Promise<SpawnResult> {
-  return spawnGroup(["git", "-C", cwd, ...args], {
-    timeoutMs: o.timeoutMs ?? 120_000,
-    env: { GIT_TERMINAL_PROMPT: "0", ...o.env },
-  });
+  const timeoutMs = o.timeoutMs ?? 120_000;
+  const started = Date.now();
+  const invoke = () => {
+    const remaining = timeoutMs > 0 ? timeoutMs - (Date.now() - started) : timeoutMs;
+    if (timeoutMs > 0 && remaining <= 0) throw new Error("git command timeout exhausted while acquiring repository flock");
+    return spawnGroup(["git", "-C", cwd, ...args], {
+      timeoutMs: remaining,
+      env: { GIT_TERMINAL_PROMPT: "0", ...o.env },
+    });
+  };
+  // These mutate the shared common directory, including calls made by preflight and cleanup outside chunk setup.
+  return args[0] === "fetch" || args[0] === "push" || args[0] === "pull" || args[0] === "branch" || args[0] === "update-ref"
+    || (args[0] === "worktree" && args[1] !== "list")
+    ? withRepoLock(cwd, invoke, timeoutMs > 0 ? timeoutMs : undefined)
+    : invoke();
 }
 
 /** Trimmed stdout of a git command; throws with stderr on failure. */
@@ -21,7 +33,7 @@ export async function gitOut(cwd: string, args: string[], budget?: TimeoutBudget
 }
 
 export async function commonDir(repo: string, budget?: TimeoutBudget): Promise<string> {
-  return resolve(repo, await gitOut(repo, ["rev-parse", "--git-common-dir"], budget));
+  return realpathSync(resolve(repo, await gitOut(repo, ["rev-parse", "--git-common-dir"], budget)));
 }
 
 /** Graphite trunk from .graphite_repo_config, else origin/HEAD, else "main". */
@@ -78,7 +90,12 @@ export async function trunkBase(run: { repo: string; remote: string; trunk: stri
 export function freePath(root: string, name: string): string {
   for (let n = 1; ; n++) {
     const p = join(root, n === 1 ? name : `${name}-${n}`);
-    if (!existsSync(p)) return p;
+    try {
+      lstatSync(p); // A dangling symlink still occupies the path.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return p;
+      throw error;
+    }
   }
 }
 
@@ -92,11 +109,8 @@ export async function pickBranch(repo: string, date: string, id: string): Promis
   }
 }
 
-/** Remove a runner-owned worktree; falls back to deleting the directory when git no longer knows it. */
+/** Remove only a Git-registered worktree; never hand-delete an unrecognised directory. */
 export async function removeWorktree(repo: string, wt: string, budget?: TimeoutBudget): Promise<void> {
   const r = await git(repo, ["worktree", "remove", "--force", wt], { timeoutMs: budget?.(120_000) });
-  if (r.code !== 0 && existsSync(wt)) {
-    rmSync(wt, { recursive: true, force: true });
-    await git(repo, ["worktree", "prune"], { timeoutMs: budget?.(120_000) });
-  }
+  if (r.code !== 0) throw new Error(`worktree remove: ${r.stderr.trim() || `exit ${r.code}`}`);
 }

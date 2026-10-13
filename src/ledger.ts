@@ -25,7 +25,11 @@ export class Ledger {
     mkdirSync(dirname(file), { recursive: true });
   }
 
-  /** Append one JSON line and echo a summary to stdout (so `journalctl -fu <unit>` shows progress). */
+  /**
+   * Append one JSON line and echo a summary to stdout (so `journalctl -fu <unit>` shows progress). The whole line is
+   * one synchronous O_APPEND write: entries from parallel chunks never interleave or reorder, and chunk-scoped events
+   * carry `chunk`, so readers group by chunk id rather than by position.
+   */
   log(event: string, fields: Record<string, unknown> = {}): void {
     const entry: LedgerEntry = { ts: new Date().toISOString(), event, ...fields };
     appendFileSync(this.file, `${JSON.stringify(entry)}\n`);

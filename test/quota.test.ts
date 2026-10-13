@@ -7,7 +7,7 @@ const chain = ["anthropic", "openai-codex", "cursor"];
 const clone = () => structuredClone(usage) as any;
 const rep = (u: any, p: string) => u.reports.find((r: any) => r.provider === p);
 const lim = (u: any, p: string, w: string) => rep(u, p).limits.find((l: any) => l.scope.windowId === w);
-const ev = (u: unknown, f = floors, c = chain) => evaluateQuota(u, f, c, 40);
+const ev = (u: unknown, f: Record<string, number> = floors, c = chain) => evaluateQuota(u, f, c, 40);
 
 test("healthy usage ok", () => expect(ev(usage)).toEqual({ ok: true }));
 

@@ -83,17 +83,18 @@ One batched `ask`; the first option is the recommended default.
 - Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
 - Models: `plan @default, build @smol` / `plan @default, build @default` / `plan @smol, build @smol`.
 - PR mode: `Independent drafts off <trunk>` / `One stack`.
+- Parallel chunks: `1` (recommended) / `2` / `3` (-> `concurrency`). More than 1 only works with independent drafts (`One stack` always uses 1) and only suits chunks whose tests can run at the same time (no shared ports, databases, containers or fixed output paths).
 - Only for a non-work GitHub remote, delivery: `Local branches only` (recommended; forge `local`) / `Push + gh draft PR` (forge `github`).
 
 ## Step 4 Launch
 
-Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `HH:MM` local override, resolved to the next occurrence; omit it for the recommended safety-cap-only option):
+Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `HH:MM` local override, resolved to the next occurrence; omit it for the recommended safety-cap-only option; `concurrency` is 1-3 and above 1 requires `prMode: independent`):
 
 ```json
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
   "runDir": "/abs", "worktreeRoot": "/abs", "unit": "omp-overnight-<repoName>-<date>",
   "remote": "origin", "trunk": "main", "forge": "graphite|github|local", "prMode": "independent|stack",
-  "safetyCap": "<from estimate>", "selfReview": false, "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
+  "safetyCap": "<from estimate>", "selfReview": false, "concurrency": 1, "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
@@ -101,7 +102,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `H
 
 Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
 
-Show a summary: goal, forge, trunk, PR mode, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Then run `CLI launch <runDir>/run.json`.
+Show a summary: goal, forge, trunk, PR mode, parallel chunks, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Then run `CLI launch <runDir>/run.json`.
 
 - Preflight FAIL: show the failing checks, `ask` `Fix and retry` / `Abort`.
 - Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell the user the session can be closed, end the turn.

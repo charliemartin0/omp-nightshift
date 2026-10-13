@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Status, setChunkStatus } from "./backlog";
 import { Ledger } from "./ledger";
+import { withRepoLock } from "./repolock";
 import { spawnGroup } from "./proc";
 import { type RunJson, parseDuration, resolveStopAt } from "./runjson";
 
@@ -11,6 +12,9 @@ export interface Clock {
 }
 
 export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) };
+
+/** Serialises short repository mutation callbacks; nested runner scopes reenter the same lock. */
+export type Lock = <T>(fn: () => Promise<T>) => Promise<T>;
 
 export interface Ctx {
   run: RunJson;
@@ -25,8 +29,15 @@ export interface Ctx {
   clock: Clock;
   /** `omp usage --json` parsed; null when unparseable */
   readUsage(): Promise<unknown>;
-  /** chunk currently in status `running` (for the signal handler / crash path) */
-  running: string | null;
+  /** chunks currently in status `running` (for the signal handler / crash path) */
+  running: Set<string>;
+  /** Chunks admitted to setup, including planning and waiting for the repository lock. */
+  settingUp: Set<string>;
+  /**
+   * Serialises short shared-repository steps against both runner chunks and agent shell wrappers, using flock in
+   * the common Git directory. Setup commands, agents and tests run outside this lock.
+   */
+  repoLock: Lock;
   backlog: string;
   overlay: string;
   logs: string;
@@ -70,7 +81,9 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
         return null;
       }
     },
-    running: null,
+    running: new Set(),
+    settingUp: new Set(),
+    repoLock: (fn) => withRepoLock(run.repo, fn),
     backlog,
     overlay: join(run.runDir, "overlay.yml"),
     logs,
