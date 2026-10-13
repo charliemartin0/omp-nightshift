@@ -8,6 +8,7 @@ import { freePath, git, gitOut, originUrl, parseRemote, pickBranch, trunkBase } 
 import { STALL_RESUME_MESSAGE, fixResumeMessage, renderChunkPrompt } from "./prompt";
 import { spawnGroup } from "./proc";
 import { checkQuota } from "./stops";
+import { sweepLogger } from "./sweep";
 
 export const ENV_BLOCK_RE = /\b(chrom(e|ium)|playwright|browser|docker|socket|permission denied|EACCES|ENOENT|command not found|not installed|ECONNREFUSED|connection refused|daemon|MCP)\b|fail(ed|s)? to (start|launch|connect|initiali[sz]e)|cannot (start|launch|connect|initiali[sz]e)/i;
 
@@ -80,6 +81,8 @@ export async function runSetupCommand(ctx: Ctx, chunkId: string, wt: string): Pr
     cwd: wt,
     timeoutMs: run.limits.testTimeoutMinutes * 60_000,
     onSuspend: (gap) => ctx.noteSuspend(gap, "setup", chunkId),
+    sweep: "deep",
+    onSweep: sweepLogger(ctx, "setup", chunkId),
     logFile: join(ctx.logs, `${chunkId}-setup.log`),
   });
   return r.code === 0 && !r.timedOut ? null : `${r.timedOut ? "timed out" : `exit ${r.code}`}; see logs/${chunkId}-setup.log`;

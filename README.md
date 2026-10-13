@@ -108,6 +108,16 @@ an explicit `stopAt` stays wall-clock. Watchdog trips now say which limit fired,
 `watchdog timeout: ran 12 min awake against a 95 min wall-clock limit, 300 min host suspend excluded; 473629 of
 3000000 tokens (cap not reached)`, so a timeout is never reported as a token cap.
 
+## Scope sweep
+
+Every child (omp session, setup, each gate test run) starts under `setsid`. When it exits, the runner SIGTERMs, waits
+3 s and SIGKILLs whatever is left of its process group and, for agent sessions, setup and gate tests, its session.
+That stops orphaned dev servers, headless browsers and `yarn` trees before the next phase, so a stale listener cannot
+fail the next gate with "port already in use" or serve another chunk's worktree. Findings are logged as
+`sweep {phase, found, comms}` ledger events (and `swept` on `omp_exit`). Only processes in the child's own group/session
+are touched; processes that call `setsid` themselves, and everything unrelated, are left alone. Transient systemd scopes
+were rejected because a scope outlives the unit if the runner crashes.
+
 ## Preflight
 
 Global checks cover power, a clean main checkout, remote/forge access (including `gh api user`) and the
