@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Status, setChunkStatus } from "./backlog";
+import { type DiskSample, probeDisk } from "./disk";
 import { Ledger } from "./ledger";
 import { withRepoLock } from "./repolock";
 import { spawnGroup } from "./proc";
@@ -29,6 +30,8 @@ export interface Ctx {
   clock: Clock;
   /** `omp usage --json` parsed; null when unparseable */
   readUsage(): Promise<unknown>;
+  /** Fresh free-space measurement of the repo/worktree filesystems (and the WSL host drive). */
+  readDisk(): Promise<DiskSample>;
   /** chunks currently in status `running` (for the signal handler / crash path) */
   running: Set<string>;
   /** Chunks admitted to setup, including planning and waiting for the repository lock. */
@@ -83,6 +86,7 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
     },
     running: new Set(),
     settingUp: new Set(),
+    readDisk: () => probeDisk(run),
     repoLock: (fn) => withRepoLock(run.repo, fn),
     backlog,
     overlay: join(run.runDir, "overlay.yml"),

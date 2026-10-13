@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Chunk, type Need, chunkNeeds } from "./backlog";
 import { type Clock, oneLine } from "./ctx";
+import { DF_TIMEOUT_MS, type DiskSample, probeDisk } from "./disk";
 import { type TimeoutBudget, commonDir, git, originUrl, parseRemote, removeWorktree, trunkBase } from "./git";
 import type { Ledger } from "./ledger";
 import { errMsg, readLines, sleep, spawnGroup, startGroup } from "./proc";
@@ -112,6 +113,8 @@ export interface PreflightOptions {
   clock?: Clock;
   recheck?: boolean;
   onResult?: (c: Check) => void;
+  /** Disk probe seam: defaults to the real measurement; tests inject deterministic samples. */
+  readDisk?: () => Promise<DiskSample>;
 }
 
 /** Bound a single preflight subprocess/sleep by the caller's remaining deadline; never start at/past it. */
@@ -221,6 +224,16 @@ export async function runPreflight(run: RunJson, o: PreflightOptions): Promise<C
     add(await evaluate("power", power));
     add(await evaluate("git_clean", () => gitClean(run)));
   }
+  // Free space comes first: a low disk must stop the run before any fetch, worktree or baseline test allocates.
+  // Past the deadline every remaining check fails identically, so keep recording them (unchanged result shape).
+  const disk = await evaluate("disk", async () => {
+    budget(DF_TIMEOUT_MS);
+    const s = await (o.readDisk ?? (() => probeDisk(run)))();
+    return { name: "disk", ok: s.ok, detail: s.detail };
+  });
+  add(disk);
+  const pastDeadline = o.deadlineAtMs !== undefined && (o.clock?.now() ?? Date.now()) >= o.deadlineAtMs;
+  if (!disk.ok && !pastDeadline) return results;
   add(await evaluate("forge_auth", () => forgeAuth(run, budget)));
   if (o.needs.includes("docker")) add(await evaluate("docker", () => docker(budget), "docker"));
   if (o.needs.includes("browser")) {

@@ -36,7 +36,7 @@ Delivery follows that repository's instructions; choose local branches unless yo
 
 - `launch <run.json> [--dry-run] [--retry-blocked]` validate, write `overlay.yml`, preflight (prints PASS/FAIL/WARN), optionally reset blocked chunks, start the unit
 - `run <run.json> [--dry-run]` runner body, started by systemd (dry-run never starts an omp session)
-- `status [--repo <path>]` unit state, chunk table, ledger tail, worktrees, report path
+- `status [--repo <path>]` unit state, chunk table, ledger tail, worktrees, report path, free disk space
 - `stop [--repo <path>]` stop the unit; worktrees, branches and PRs are left alone
 - `trunk [--repo <path>]` trunk branch (Graphite config, else `origin/HEAD`, else `main`)
 - `estimate <backlog.md>` pending-chunk estimate from history: median/p90 finish, expected quota waits, recommended safety cap
@@ -73,6 +73,10 @@ Stop a run with `/skill:overnight stop`; it leaves real worktrees, branches, and
 - `sessions/<id>/` omp session dirs
 - `logs/<id>-omp-<n>.jsonl` raw stream, `logs/<id>-setup.log`, `logs/<id>-test-<k>.log`, `logs/preflight.log`
 - `logs/<id>-pr-body.md`, `logs/<id>-review.log`, `reviews/<id>.md`
+
+Log files are capped: 200 MiB per `.log`/`.jsonl` file and 1 GiB for the whole `logs/` directory. A capped file
+keeps its newest output and starts with `[disk log cap: earlier output truncated]`; the oldest files give up space
+first. The ledger, prompts, sessions, reports and every file outside `logs/` are never capped or removed.
 
 Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk-id>`; the run lock is
 `~/.omp/overnight/<repoName>/lock`.
@@ -148,7 +152,7 @@ worktree, continue the remaining cleanup, and still produce a runner-error repor
 
 ## Preflight
 
-Global checks cover power, a clean main checkout, remote/forge access (including `gh api user`) and the
+Global checks cover power, a clean main checkout, free disk space, remote/forge access (including `gh api user`) and the
 baseline test in a disposable `_preflight` worktree. A global failure stops the run. Tool checks run only
 for pending chunks that need them: `docker ps`, a real Chrome/Chromium headless DOM render, a configured
 Playwright MCP initialize/navigate call, and `dotnet restore` in the same worktree after the baseline passes.
@@ -164,6 +168,36 @@ note. Each failing need check gets one retry after 15 s; no browsers are install
 services configured or MCP config edited. Environment rechecks skip power/git-clean checks.
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
+
+## Disk space
+
+The `disk` check runs first, before any fetch, worktree or baseline allocation, and measures the filesystem
+holding `repo` and the one holding `worktreeRoot` (they may differ). Values are GiB and inclusive: exactly the
+configured amount still passes. `df` failing, timing out or printing something unexpected fails the check —
+an unmeasurable disk is never treated as free space.
+
+```json
+"disk": { "minFreeGb": 20, "minHostFreeGb": 15, "waitMinutes": 60 }
+```
+
+`disk` is optional; any omitted key keeps its default, and the three defaults are the values above. `minFreeGb`
+covers both Linux paths. Under WSL (detected via `/proc/sys/fs/binfmt_misc/WSLInterop` or `WSL_DISTRO_NAME`) the
+Windows drive holding the distro's `ext4.vhdx` is measured too against `minHostFreeGb`: its drive is read from the
+distribution's registry `BasePath`, else the drive of `%LOCALAPPDATA%`, else the single mounted `/mnt/<drive>`.
+When no drive can be identified, the check fails closed rather than assuming one.
+
+After preflight, the same measurement guards every chunk admission. Below a threshold the runner pauses new
+chunks, logs a `disk_wait` ledger event (detail, measured volumes, minutes waited) and re-measures every 5 min;
+running chunks are never interrupted. If free space does not recover within `waitMinutes` (default 60; `0` stops
+at once) the run ends gracefully with `stop reason=disk` after draining the chunks still in flight, and
+`status`/journal output shows the low sample. `disk_wait` time is not counted as a stall by the no-progress limit.
+
+When a chunk ends terminally (its PR delivered, or the chunk failed/blocked/skipped), its worktree is cleaned of
+build outputs: `node_modules`, `bin`, `obj`, `dist`, `test-results`, `playwright-report`, `.turbo` and `coverage`
+at any depth. Only untracked files are removed, tracked files and their directories survive, and the cleanup
+refuses paths outside the worktree, symlinks, and any worktree it does not own. One `disk_cleanup` ledger event
+reports reclaimed bytes (logical sizes), removed file count and refusals. The worktree and branch themselves are
+kept, and requeued chunks keep their outputs.
 
 ## Blocked chunks
 

@@ -88,7 +88,7 @@ One batched `ask`; the first option is the recommended default.
 
 ## Step 4 Launch
 
-Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `HH:MM` local override, resolved to the next occurrence; omit it for the recommended safety-cap-only option; `concurrency` is 1-3 and above 1 requires `prMode: independent`):
+Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `HH:MM` local override, resolved to the next occurrence; omit it for the recommended safety-cap-only option; `concurrency` is 1-3 and above 1 requires `prMode: independent`; `disk` is optional and free-space thresholds are GiB, inclusive, with these defaults):
 
 ```json
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
@@ -97,10 +97,15 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `H
   "safetyCap": "<from estimate>", "selfReview": false, "concurrency": 1, "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
-  "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
+  "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 },
+  "disk": { "minFreeGb": 20, "minHostFreeGb": 15, "waitMinutes": 60 } }
 ```
 
-Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
+Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`. The disk defaults keep the
+run from filling the volume: preflight fails before any worktree is created when free space is below the thresholds,
+later admission pauses new chunks (5 min polls, `disk_wait` ledger events) and stops gracefully with `stop reason=disk`
+after `waitMinutes`, and each terminal chunk has its build outputs cleaned from its own worktree. Under WSL the
+Windows drive behind the distro is checked too. Only ask the user about `disk` if they raise disk space themselves.
 
 Show a summary: goal, forge, trunk, PR mode, parallel chunks, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Then run `CLI launch <runDir>/run.json`.
 

@@ -1,7 +1,8 @@
-import { closeSync, existsSync, readdirSync, statSync, writeSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { type Ctx, deadline } from "./ctx";
-import { openAppend, readLines, settle, startGroup } from "./proc";
+import { type LogLimits, openBoundedLog } from "./logcap";
+import { readLines, settle, startGroup } from "./proc";
 import { parseDuration } from "./runjson";
 import { QUOTA_ERROR_RE, type Trip, Watchdog } from "./watchdog";
 
@@ -76,7 +77,7 @@ export function newestSessionFile(dir: string): string | null {
  */
 export async function runOmp(
   ctx: Ctx,
-  o: { chunk: string; wt: string; n: number; mode: OmpMode; tokensUsed: number },
+  o: { chunk: string; wt: string; n: number; mode: OmpMode; tokensUsed: number; logLimits?: LogLimits },
 ): Promise<AgentRun> {
   const { limits } = ctx.run;
   const maxTime = o.mode.kind === "initial" ? limits.maxTime : limits.resumeMaxTime;
@@ -99,8 +100,8 @@ export async function runOmp(
   });
   const dir = sessionsDir(ctx, o.chunk);
   const logBase = join(ctx.logs, `${o.chunk}-omp-${o.n}`);
-  const out = openAppend(`${logBase}.jsonl`);
-  const err = openAppend(`${logBase}.stderr.log`);
+  const out = openBoundedLog(`${logBase}.jsonl`, o.logLimits);
+  const err = openBoundedLog(`${logBase}.stderr.log`, o.logLimits);
   const g = startGroup(ompArgv(ctx, o.chunk, o.wt, o.mode), { cwd: o.wt });
 
   let trip: Trip | null = null;
@@ -123,19 +124,19 @@ export async function runOmp(
   const pumps = Promise.all([
     (async () => {
       for await (const line of readLines(g.stdout)) {
-        writeSync(out, `${line}\n`);
+        out.write(`${line}\n`);
         wd.onLine(line, Date.now());
       }
     })(),
     (async () => {
-      for await (const line of readLines(g.stderr)) writeSync(err, `${line}\n`);
+      for await (const line of readLines(g.stderr)) err.write(`${line}\n`);
     })(),
   ]);
   const code = await g.exited;
   await settle(pumps, 3000); // a stray grandchild must not hold us here
   clearInterval(tick);
-  closeSync(out);
-  closeSync(err);
+  out.close();
+  err.close();
   ctx.runTokens += wd.tokens - o.tokensUsed;
   // omp may exit between ticks with the cap already spent: never let that reach the gate/fix-resume path.
   if (!trip && wd.tokens >= limits.tokenCap) {

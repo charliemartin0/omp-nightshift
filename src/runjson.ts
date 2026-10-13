@@ -3,6 +3,14 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { errMsg } from "./proc";
 
 export type Forge = "graphite" | "github" | "local";
+export interface DiskConfig {
+  /** GiB that must stay free on the filesystem holding repo/worktreeRoot (and the WSL host drive). */
+  minFreeGb: number;
+  /** GiB that must stay free on the Windows drive backing the WSL distro; only measured under WSL. */
+  minHostFreeGb: number;
+  /** Minutes to wait for space to come back before stopping with reason `disk`; 0 stops immediately. */
+  waitMinutes: number;
+}
 export interface Limits {
   maxTime: string;
   resumeMaxTime: string;
@@ -36,10 +44,14 @@ export interface RunJson {
   setupCommand: string;
   preflightTest: string;
   limits: Limits;
+  /** Free-space policy: normalized, so callers never re-apply defaults. */
+  disk: DiskConfig;
 }
 
 export const RESERVE_PCT_DEFAULT = 40;
 export const MAX_CONCURRENCY = 3;
+export const DISK_DEFAULTS: DiskConfig = { minFreeGb: 20, minHostFreeGb: 15, waitMinutes: 60 };
+export const GIB = 1024 ** 3;
 
 export const LIMIT_DEFAULTS: Limits = {
   maxTime: "90m",
@@ -51,10 +63,11 @@ export const LIMIT_DEFAULTS: Limits = {
 
 const TOP_KEYS = [
   "version", "repo", "repoName", "date", "goal", "runDir", "worktreeRoot", "unit", "remote", "trunk", "forge",
-  "prMode", "stopAt", "safetyCap", "selfReview", "concurrency", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
+  "prMode", "stopAt", "safetyCap", "selfReview", "concurrency", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits", "disk",
 ];
-const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview", "concurrency"];
+const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview", "concurrency", "disk"];
 const MODEL_KEYS = ["plan", "build", "report"];
+const DISK_KEYS = Object.keys(DISK_DEFAULTS);
 
 export function sanitizeRepoName(name: string): string {
   return name.replace(/[^A-Za-z0-9-]/g, "-");
@@ -132,6 +145,13 @@ export function validateRunJson(x: unknown): RunJson {
   num(l.stallMinutes, "limits.stallMinutes", 1);
   num(l.tokenCap, "limits.tokenCap", 1, Infinity, true);
   num(l.testTimeoutMinutes, "limits.testTimeoutMinutes", 1);
+  const diskIn = o.disk === undefined ? {} : obj(o.disk, "disk");
+  noUnknown(diskIn, DISK_KEYS, "disk");
+  const disk: DiskConfig = {
+    minFreeGb: diskIn.minFreeGb === undefined ? DISK_DEFAULTS.minFreeGb : num(diskIn.minFreeGb, "disk.minFreeGb", 0),
+    minHostFreeGb: diskIn.minHostFreeGb === undefined ? DISK_DEFAULTS.minHostFreeGb : num(diskIn.minHostFreeGb, "disk.minHostFreeGb", 0),
+    waitMinutes: diskIn.waitMinutes === undefined ? DISK_DEFAULTS.waitMinutes : num(diskIn.waitMinutes, "disk.waitMinutes", 0),
+  };
   if (o.safetyCap !== undefined) parseDuration(str(o, "safetyCap"));
   if (o.selfReview !== undefined && typeof o.selfReview !== "boolean") throw new Error("run.json: selfReview must be boolean");
   const concurrency = o.concurrency === undefined ? 1 : num(o.concurrency, "concurrency", 1, MAX_CONCURRENCY, true);
@@ -162,6 +182,7 @@ export function validateRunJson(x: unknown): RunJson {
     setupCommand: str(o, "setupCommand", undefined, true),
     preflightTest: str(o, "preflightTest"),
     limits: l,
+    disk,
   };
 }
 

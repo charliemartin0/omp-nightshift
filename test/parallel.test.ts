@@ -303,7 +303,7 @@ test("parallel dry runs claim distinct worktrees", async () => {
   const { ctx: base, dir } = setup();
   const { repo } = await realRepo(dir, 3);
   const ctx = makeCtx(validateRunJson({ ...base.run, repo, worktreeRoot: join(dir, "wt"), concurrency: 3 }), true);
-  Object.assign(ctx, { readUsage: base.readUsage, buildProviders: base.buildProviders });
+  Object.assign(ctx, { readUsage: base.readUsage, buildProviders: base.buildProviders, readDisk: base.readDisk });
   backlog(ctx, [{ id: "x" }, { id: "x-2" }, { id: "y" }]);
   const created: string[] = [];
   expect((await loop(ctx, created)).reason).toBe("finished");
@@ -316,6 +316,7 @@ test("dry setup exception after an earlier success does not suppress the next pe
   const { repo } = await realRepo(dir, 1);
   const ctx = makeCtx(validateRunJson({ ...base.run, repo, concurrency: 1 }), true);
   ctx.readUsage = base.readUsage;
+  ctx.readDisk = base.readDisk;
   backlog(ctx, [{ id: "a" }, { id: "b" }, { id: "c" }]);
   const claim = ctx.repoLock;
   let calls = 0;

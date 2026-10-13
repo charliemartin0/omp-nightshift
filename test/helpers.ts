@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Ctx, makeCtx } from "../src/ctx";
-import { validateRunJson } from "../src/runjson";
+import type { DiskSample } from "../src/disk";
+import { GIB, validateRunJson } from "../src/runjson";
 import usage from "./fixtures/usage.json";
 
 export const START = Date.parse("2026-07-01T00:00:00Z");
@@ -26,7 +27,12 @@ export function setup() {
   ctx.progressAt = START;
   ctx.buildProviders = ["anthropic", "openai-codex"];
   ctx.readUsage = async () => healthy();
+  ctx.readDisk = async () => healthyDisk();
   return { ctx, state, dir };
+}
+/** Capacity sample for tests: never depend on the machine running the suite. */
+export function healthyDisk(): DiskSample {
+  return { ok: true, detail: "disk ok", volumes: [{ kind: "repo", freeBytes: 100 * GIB, minBytes: 20 * GIB }] };
 }
 export function healthy() {
   const u = structuredClone(usage);

@@ -144,7 +144,6 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
   let failedRun = 0;
   for (let k = 1; k <= TEST_RUNS; k++) {
     const logFile = join(ctx.logs, `${chunk.id}-test-${k}.log`);
-    const offset = existsSync(logFile) ? statSync(logFile).size : 0;
     const r = await spawnGroup(["bash", "-lc", chunk.test], {
       cwd: g.wt,
       env: { CI: "1" },
@@ -154,7 +153,7 @@ async function checkTests(g: GateInput): Promise<Check & { passes: number; flaky
     if (r.code === 0 && !r.timedOut) passes++;
     else {
       failedLog = logFile;
-      failedOffset = offset;
+      failedOffset = r.logStartOffset ?? 0;
       failedRun = k;
       lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
     }

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "n
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseBacklog } from "./backlog";
+import { type DiskSample, probeDisk } from "./disk";
 import { git, gitOut } from "./git";
 import { type LedgerEntry, readLedger, summarize } from "./ledger";
 import { errMsg, spawnGroup } from "./proc";
@@ -47,7 +48,7 @@ async function unitState(unit: string): Promise<string> {
 }
 
 /** Human-readable status of the latest run for `repo`. */
-export async function statusText(repo: string): Promise<string> {
+export async function statusText(repo: string, options?: { readDisk?: () => Promise<DiskSample> }): Promise<string> {
   const run = findLatestRun(repo);
   if (!run) return `no overnight run found for ${repo}`;
   const out: string[] = [`repo: ${run.repo}`, `run: ${run.runDir} (${run.date})`, `unit: ${run.unit}: ${await unitState(run.unit)}`];
@@ -80,6 +81,19 @@ export async function statusText(repo: string): Promise<string> {
 
   const report = newest([join(run.runDir, "report.md"), join(run.runDir, "report.dry-run.md")]);
   if (report) out.push("", `report: ${report}`);
+
+  // Free space for this run, plus the newest wait that has not been superseded by a stop or a chunk start.
+  const wait = segment.findLast((e) => e.event === "disk_wait");
+  const resumed = segment.findLast((e) => e.event === "quota_admission" || e.event === "chunk_start");
+  if (wait && (!resumed || Date.parse(String(wait.ts)) > Date.parse(String(resumed.ts)))) {
+    out.push("", `disk wait: ${String(wait.detail ?? "")}${wait.waitedMinutes ? ` (waited ${wait.waitedMinutes} min of ${wait.waitMinutes})` : ""}`);
+  }
+  try {
+    const s = await (options?.readDisk ?? (() => probeDisk(run)))();
+    out.push("", `${s.ok ? "disk" : "WARNING disk"}: ${s.detail}`);
+  } catch (e) {
+    out.push("", `WARNING disk: measurement failed: ${errMsg(e)}`);
+  }
   return out.join("\n");
 }
 

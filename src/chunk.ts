@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, join } from "node:path";
 import { type AgentRun, type OmpMode, newestSessionFile, runOmp, sessionsDir } from "./agent";
 import type { Chunk, Status } from "./backlog";
+import { cleanupBuildOutputs } from "./cleanup";
 import { type Ctx, oneLine } from "./ctx";
 import { runGate } from "./gate";
 import { commonDir, freePath, git, gitOut, originUrl, parseRemote, pickBranch, trunkBase } from "./git";
@@ -17,6 +18,33 @@ export function classifyBlocked(reason: string): string {
   return /^env:/i.test(reason) || ENV_BLOCK_RE.test(reason) ? `env: ${reason.replace(/^env:\s*/i, "")}` : reason;
 }
 export const isEnvNote = (note: string): boolean => note.startsWith("env: ");
+
+/** Terminal outcomes: only these finish a chunk, so only these may have their worktree build output reclaimed. */
+export const isTerminalStatus = (status: Status): boolean => status === "passed" || status === "flaky" || status === "failed" || status === "blocked" || status === "skipped";
+
+/** Refusals recorded per `disk_cleanup` line: a symlink-heavy `node_modules` must not bloat the uncapped ledger. */
+export const MAX_LOGGED_REFUSALS = 20;
+
+/** One `disk_cleanup` ledger line per finished chunk. A failing helper becomes a `refused` entry, never an error. */
+export async function reclaimChunkOutput(ctx: Ctx, chunkId: string, wt: string): Promise<void> {
+  if (ctx.dryRun) return; // dry-run worktrees are removed by the runner, not here
+  const record = (reclaimedBytes: number, removedFiles: number, refused: string[]): void => {
+    ctx.ledger.log("disk_cleanup", {
+      chunk: chunkId,
+      wt,
+      reclaimedBytes,
+      removedFiles,
+      refusedCount: refused.length,
+      refused: refused.slice(0, MAX_LOGGED_REFUSALS),
+    });
+  };
+  try {
+    const { reclaimedBytes, removedFiles, refused } = await cleanupBuildOutputs(ctx.run.worktreeRoot, wt);
+    record(reclaimedBytes, removedFiles, refused);
+  } catch (error) {
+    record(0, 0, [oneLine(error instanceof Error ? error.message : String(error)).slice(0, 200)]);
+  }
+}
 
 export interface ChunkPlan {
   chunk: Chunk;
@@ -182,29 +210,40 @@ export async function runChunk(ctx: Ctx, chunk: Chunk, lastBranch: string | null
     return { plan, failure: await createWorktree(ctx, plan, setupId) };
   });
   let startSha = "";
+  // Reclaim terminal build output exactly once per chunk. Requeued attempts keep theirs, and a signal-interrupted
+  // process exits before this finally can run, so a live worktree is never cleaned.
+  let reclaim = false;
   const end = async (o: Outcome) => {
     const files = startSha ? (await git(plan.wt, ["diff", "--name-only", `${startSha}..HEAD`])).stdout.split("\n").filter(Boolean) : [];
     ctx.setStatus(chunk.id, o.status, o.note);
     ctx.running.delete(chunk.id);
     ctx.settingUp.delete(chunk.id);
     ctx.ledger.log("chunk_end", { chunk: chunk.id, status: o.status, note: o.note, changedFiles: files });
+    reclaim = isTerminalStatus(o.status);
     return { ...o, branch: plan.branch };
   };
 
-  let setup = failure;
-  if (!setup) {
-    const setupErr = await runSetupCommand(ctx, chunk.id, plan.wt);
-    if (setupErr !== null) setup = new SetupFailure("setup_failed", setupErr);
+  try {
+    let setup = failure;
+    if (!setup) {
+      const setupErr = await runSetupCommand(ctx, chunk.id, plan.wt);
+      if (setupErr !== null) setup = new SetupFailure("setup_failed", setupErr);
+    }
+    if (setup) return await end(["fetch_failed", "setup_failed"].includes(setup.reason)
+      ? { status: "blocked", note: `env: ${setup.message}` }
+      : { status: "failed", note: setup.message });
+    startSha = await gitOut(plan.wt, ["rev-parse", "HEAD"]);
+    writeFileSync(join(ctx.prompts, `${chunk.id}.md`), renderChunkPrompt(ctx.run, chunk, plan));
+    mkdirSync(sessionsDir(ctx, chunk.id), { recursive: true });
+    ctx.setStatus(chunk.id, "running", "");
+    ctx.settingUp.delete(chunk.id);
+    ctx.running.add(chunk.id);
+    ctx.ledger.log("chunk_start", { chunk: chunk.id, setup: setupId, branch: plan.branch, base: plan.base, wt: plan.wt });
+    return await end(await executeChunk(ctx, plan, startSha));
+  } catch (error) {
+    reclaim = true; // the worktree is known: reclaim once before propagating the unchanged error
+    throw error;
+  } finally {
+    if (reclaim) await reclaimChunkOutput(ctx, chunk.id, plan.wt);
   }
-  if (setup) return end(["fetch_failed", "setup_failed"].includes(setup.reason)
-    ? { status: "blocked", note: `env: ${setup.message}` }
-    : { status: "failed", note: setup.message });
-  startSha = await gitOut(plan.wt, ["rev-parse", "HEAD"]);
-  writeFileSync(join(ctx.prompts, `${chunk.id}.md`), renderChunkPrompt(ctx.run, chunk, plan));
-  mkdirSync(sessionsDir(ctx, chunk.id), { recursive: true });
-  ctx.setStatus(chunk.id, "running", "");
-  ctx.settingUp.delete(chunk.id);
-  ctx.running.add(chunk.id);
-  ctx.ledger.log("chunk_start", { chunk: chunk.id, setup: setupId, branch: plan.branch, base: plan.base, wt: plan.wt });
-  return end(await executeChunk(ctx, plan, startSha));
 }

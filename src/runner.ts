@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Chunk, type Need, chunkNeeds, parseBacklog } from "./backlog";
 import { type Outcome, isEnvNote, runChunk } from "./chunk";
-import { type Ctx, deadline, makeCtx } from "./ctx";
+import { type Ctx, deadline, makeCtx, realClock } from "./ctx";
+import type { DiskSample } from "./disk";
 import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
@@ -17,6 +18,20 @@ import { markInterrupted, recoverSetup } from "./setup";
 
 /** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
 export const MAX_QUOTA_REQUEUES = 3;
+
+/** How often a low-space run re-measures and re-logs while it waits for free space to come back. */
+export const DISK_POLL_MS = 5 * 60_000;
+
+/** `disk_wait` ledger line: same shape as `quota_wait`, tagged with the measured volumes. */
+export function logDiskWait(ctx: Ctx, sample: DiskSample, waitedMinutes: number): void {
+  ctx.ledger.log("disk_wait", {
+    detail: sample.detail,
+    volumes: sample.volumes,
+    waitedMinutes,
+    waitMinutes: ctx.run.disk.waitMinutes,
+    message: `free space below threshold; waiting up to ${ctx.run.disk.waitMinutes} min for it before stopping`,
+  });
+}
 
 /** Refresh the finish estimate while keeping the launch's fixed safety cap. */
 export function logEstimate(ctx: Ctx): void {
@@ -44,7 +59,7 @@ export async function loop(
   recheck: (needs: Need[]) => Promise<Check[]> = (needs) => {
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
     const { dotnetTarget, dotnetCwd } = preflightRequirements(chunks.map((c) => ({ ...c, status: "pending" })));
-    return runPreflight(ctx.run, { ledger: ctx.ledger, logFile: join(ctx.logs, "preflight.log"), needs, recheck: true, dotnetTarget, dotnetCwd, deadlineAtMs: deadline(ctx).atMs - STOP_MARGIN_MS, clock: ctx.clock });
+    return runPreflight(ctx.run, { ledger: ctx.ledger, logFile: join(ctx.logs, "preflight.log"), needs, recheck: true, readDisk: () => ctx.readDisk(), dotnetTarget, dotnetCwd, deadlineAtMs: deadline(ctx).atMs - STOP_MARGIN_MS, clock: ctx.clock });
   },
 ): Promise<Stop> {
   const seen = new Set<string>();
@@ -60,6 +75,59 @@ export async function loop(
   let dryIndex = 0;
   let stop: Stop | null = null;
   let error: { cause: unknown } | null = null;
+
+  // Free-space guard state. `lowSince` spans the whole low episode, not one admission, so the wait budget is
+  // measured from the first low sample and survives chunk completions.
+  const diskWaitMs = ctx.run.disk.waitMinutes * 60_000;
+  let diskLowSince: number | null = null;
+  let diskLoggedAt: number | null = null;
+  let diskNextPollAt = 0;
+
+  /** Milliseconds to the next re-probe, bounded by the wait budget and the effective deadline; positive while low. */
+  const diskPollIn = (): number => {
+    const now = ctx.clock.now();
+    return Math.max(0, Math.min(diskNextPollAt, (diskLowSince ?? now) + diskWaitMs, deadline(ctx).atMs - STOP_MARGIN_MS) - now);
+  };
+
+  /**
+   * Free-space gate: `null` admits, `"wait"` defers admission while space is low, otherwise the run stops. A failed
+   * probe counts as low space, so a broken measurement can never be mistaken for available capacity.
+   */
+  const diskGate = async (): Promise<Stop | "wait" | null> => {
+    const sample = await ctx.readDisk();
+    const now = ctx.clock.now();
+    if (sample.ok) {
+      diskLowSince = null;
+      diskLoggedAt = null;
+      return null;
+    }
+    if (diskLowSince === null) diskLowSince = now;
+    if (diskLoggedAt === null || now - diskLoggedAt >= DISK_POLL_MS) {
+      logDiskWait(ctx, sample, Math.round((now - diskLowSince) / 60_000));
+      diskLoggedAt = now;
+    }
+    diskNextPollAt = now + DISK_POLL_MS;
+    if (ctx.dryRun) return { reason: "disk", detail: sample.detail };
+    const d = deadline(ctx);
+    const waitLimit = diskLowSince + diskWaitMs;
+    const marginAt = d.atMs - STOP_MARGIN_MS;
+    if (now >= waitLimit || now >= marginAt) {
+      if (marginAt <= waitLimit) return { reason: d.reason, detail: `${Math.round((d.atMs - now) / 60_000)} min to ${new Date(d.atMs).toISOString()}` };
+      return { reason: "disk", detail: `free space below threshold for ${Math.round((now - diskLowSince) / 60_000)} min: ${sample.detail}` };
+    }
+    return "wait";
+  };
+
+  /** Cancellable disk-poll timer; unref'd on the real clock so a pending poll never holds the process open. */
+  const pollTimer = (ms: number): { promise: Promise<void>; cancel(): void } => {
+    if (ctx.clock !== realClock) return { promise: ctx.clock.sleep(ms), cancel: () => {} };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const promise = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+      timer.unref();
+    });
+    return { promise, cancel: () => clearTimeout(timer ?? undefined) };
+  };
 
   const start = async (chunk: Chunk, sequence: number): Promise<Done> => {
     try {
@@ -82,6 +150,20 @@ export async function loop(
       if (verdict === "hold") return;
       if (verdict) {
         stop = verdict;
+        return;
+      }
+      let gate = await diskGate();
+      // Idle and low: wait for the next poll, then re-probe. Running chunks are never interrupted by this guard.
+      while (gate === "wait" && inFlight.size === 0) {
+        // diskGate reports "wait" only before the wait budget and the deadline margin, so this sleep is positive.
+        const ms = diskPollIn();
+        await ctx.clock.sleep(ms);
+        ctx.progressAt += ms; // an intentional disk wait is not a stall
+        gate = await diskGate();
+      }
+      if (gate === "wait") return; // chunks in flight: the poll timer re-enters admission
+      if (gate) {
+        stop = gate;
         return;
       }
       seen.add(next.id);
@@ -136,7 +218,21 @@ export async function loop(
       }
     }
     if (inFlight.size) {
-      const done = await Promise.race(inFlight.values());
+      const poll = diskLowSince === null || stop || error ? null : pollTimer(diskPollIn());
+      let first: Done | void;
+      try {
+        first = await Promise.race(poll ? [...inFlight.values(), poll.promise] : [...inFlight.values()]);
+      } finally {
+        poll?.cancel();
+      }
+      if (!first) {
+        // A disk poll tick re-measures here: fill() can return before the gate (held dispatch, no unseen pending
+        // chunk, held-back outcomes), and re-arming an already-elapsed timer would spin at tick cadence.
+        const gate = await diskGate();
+        if (gate && gate !== "wait") stop ??= gate;
+        continue;
+      }
+      const done = first;
       inFlight.delete(done.chunk.id);
       try {
         let result: Exclude<Done, { kind: "error" }>;
@@ -209,7 +305,8 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
   try {
     await recoverSetup(ctx);
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
-    const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log"), ...preflightRequirements(chunks) });
+    // `readDisk` comes from the context, so tests never measure the machine they run on.
+    const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log"), readDisk: () => ctx.readDisk(), ...preflightRequirements(chunks) });
     logEstimate(ctx);
     const failed = checks.filter((c) => !c.ok && !c.need).map((c) => c.name);
     if (failed.length) {

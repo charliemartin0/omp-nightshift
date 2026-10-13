@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseBacklog } from "../src/backlog";
 import { chunksBlockedBy, preflightRequirements, preflightTimeoutMs, runPreflight } from "../src/preflight";
-import { backlog, setup } from "./helpers";
+import { backlog, healthyDisk, setup } from "./helpers";
 
 test("preflight blocks only pending chunks needing the failed tool", () => {
   const { ctx } = setup();
@@ -60,7 +60,7 @@ test("dotnet preflight restores the relative target from the test's cd directory
   try {
     process.env.PATH = `${bin}:${oldPath ?? ""}`;
     const logFile = join(ctx.logs, "preflight-cwd.log");
-    const checks = await runPreflight(ctx.run, { ledger: null, logFile, recheck: true, ...preflightRequirements(chunks) });
+    const checks = await runPreflight(ctx.run, { ledger: null, logFile, recheck: true, readDisk: async () => healthyDisk(), ...preflightRequirements(chunks) });
     expect(checks.find((c) => c.name === "dotnet")?.ok).toBe(true);
     expect(readFileSync(logFile, "utf8")).toContain("_preflight/Backend restore Tests/Tests.csproj");
   } finally {
@@ -77,7 +77,7 @@ test("preflight timeout budget caps commands and retry delays; expired deadlines
   expect(preflightTimeoutMs({}, 60_000)).toBe(60_000);
   state.t = deadlineAtMs;
   expect(() => preflightTimeoutMs({ deadlineAtMs, clock: ctx.clock }, 15_000)).toThrow("preflight deadline reached");
-  const checks = await runPreflight(ctx.run, { ledger: null, logFile: join(ctx.logs, "never.log"), needs: ["docker"], recheck: true, deadlineAtMs, clock: ctx.clock });
+  const checks = await runPreflight(ctx.run, { ledger: null, logFile: join(ctx.logs, "never.log"), needs: ["docker"], recheck: true, readDisk: async () => healthyDisk(), deadlineAtMs, clock: ctx.clock });
   expect(checks.find((c) => c.name === "forge_auth")?.ok).toBe(true);
   expect(checks.filter((c) => c.name !== "forge_auth").every((c) => !c.ok && c.detail === "preflight deadline reached")).toBe(true);
   expect(state.sleeps).toEqual([]);

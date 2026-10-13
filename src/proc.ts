@@ -1,7 +1,6 @@
 // Process-group spawning. Every long-running child runs under `setsid`, so it leads its own
 // process group and timeouts/signals reach grandchildren via process.kill(-pid, ...).
-import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { type BoundedLog, type LogLimits, openBoundedLog } from "./logcap";
 import type { FileSink } from "bun";
 
 export const GRACE_MS = 15_000;
@@ -101,11 +100,6 @@ export async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGener
   if (buf) yield buf;
 }
 
-export function openAppend(file: string): number {
-  mkdirSync(dirname(file), { recursive: true });
-  return openSync(file, "a");
-}
-
 export interface SpawnOpts {
   cwd?: string;
   env?: Record<string, string>;
@@ -113,29 +107,40 @@ export interface SpawnOpts {
   timeoutMs?: number;
   /** Append stdout+stderr here (header line `$ argv`). */
   logFile?: string;
+  /** Caps for the bounded log writer (`logFile` only); defaults to the logcap module defaults. */
+  logLimits?: LogLimits;
 }
 export interface SpawnResult {
   code: number;
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  /** Byte offset where this invocation's log content begins (`logFile` only), else null. */
+  logStartOffset: number | null;
 }
 
-async function drain(stream: ReadableStream<Uint8Array>, sink: { text: string }, fd: number | null): Promise<void> {
+async function drain(stream: ReadableStream<Uint8Array>, sink: { text: string }, log: BoundedLog | null): Promise<void> {
   const dec = new TextDecoder();
   for await (const chunk of stream) {
     const s = dec.decode(chunk, { stream: true });
     sink.text += s;
     if (sink.text.length > OUTPUT_CAP) sink.text = sink.text.slice(-OUTPUT_CAP / 2);
-    if (fd !== null) writeSync(fd, s);
+    if (log !== null) log.write(s);
   }
 }
 
 /** Run to completion inside its own process group, capturing (and optionally logging) output. */
 export async function spawnGroup(argv: string[], o: SpawnOpts = {}): Promise<SpawnResult> {
-  const g = startGroup(argv, o);
-  const fd = o.logFile ? openAppend(o.logFile) : null;
-  if (fd !== null) writeSync(fd, `$ ${argv.join(" ")}\n`);
+  // Open the log first: a refused log path (symlink, unwritable) must not leave an unawaited child behind.
+  const log = o.logFile ? openBoundedLog(o.logFile, o.logLimits) : null;
+  let g: Group;
+  try {
+    g = startGroup(argv, o);
+  } catch (error) {
+    log?.close();
+    throw error;
+  }
+  log?.write(`$ ${argv.join(" ")}\n`);
   let timedOut = false;
   const timer = o.timeoutMs
     ? setTimeout(() => {
@@ -145,11 +150,12 @@ export async function spawnGroup(argv: string[], o: SpawnOpts = {}): Promise<Spa
     : undefined;
   const out = { text: "" };
   const err = { text: "" };
-  const drained = Promise.all([drain(g.stdout, out, fd), drain(g.stderr, err, fd)]);
+  const drained = Promise.all([drain(g.stdout, out, log), drain(g.stderr, err, log)]);
   const code = await g.exited;
   // A daemonised grandchild outside the group could hold the pipes open; do not wait on it forever.
   await settle(drained, 3000);
   clearTimeout(timer);
-  if (fd !== null) closeSync(fd);
-  return { code, timedOut, stdout: out.text, stderr: err.text };
+  const logStartOffset = log ? log.startOffset : null;
+  log?.close();
+  return { code, timedOut, stdout: out.text, stderr: err.text, logStartOffset };
 }

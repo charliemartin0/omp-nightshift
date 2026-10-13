@@ -8,6 +8,7 @@ import { MAX_QUOTA_REQUEUES, loop } from "../src/runner";
 import { QUOTA_RECHECK_MS, QUOTA_RESET_SLACK_MS, checkStop } from "../src/stops";
 import { validateRunJson } from "../src/runjson";
 import usage from "./fixtures/usage.json";
+import { healthyDisk } from "./helpers";
 
 const START = Date.parse("2026-07-01T00:00:00Z");
 const HOUR = 3_600_000;
@@ -34,6 +35,7 @@ function setup(opts: { stopAtMs?: number } = {}) {
   ctx.capAtMs = START + 12 * HOUR;
   ctx.progressAt = START;
   ctx.buildProviders = chain;
+  ctx.readDisk = async () => healthyDisk();
   return { ctx, state, dir };
 }
 
