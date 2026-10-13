@@ -13,7 +13,9 @@ Linux with a running systemd user manager, Bun (tested with 1.4.2), Git, Bash, a
 [omp](https://github.com/can1357/oh-my-pi), configure its model roles, and confirm
 `omp usage --json` works. GitHub delivery also needs authenticated `gh` and Git remote
 access; Graphite delivery needs authenticated `gt` and an initialized Graphite repository.
-`notify-send` is optional. macOS and Windows are not supported.
+`notify-send` is optional. macOS and native Windows are not supported. For running inside
+Linux on WSL2, see optional [Windows/WSL host preparation](docs/windows-host.md); the
+Linux prerequisites above still apply.
 
 ## Install
 
