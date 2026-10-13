@@ -20,18 +20,23 @@ export async function dryRunChunk(
   created: string[],
 ): Promise<string | null> {
   const { run, ledger } = ctx;
-  const plan = await planChunk(ctx, chunk, lastBranch);
   const fail = (note: string) => {
     ledger.log("chunk_end", { chunk: chunk.id, status: "failed", note, changedFiles: [] });
     return null;
   };
 
-  ledger.log("chunk_start", { chunk: chunk.id, dryRun: true, branch: plan.branch, base: plan.base, wt: plan.wt });
-  const fetchErr = await fetchTrunk(ctx);
-  if (fetchErr !== null) return fail(`fetch_failed: ${fetchErr.trim()}`);
-  const add = await git(run.repo, ["worktree", "add", "--detach", plan.wt, (await trunkBase(run)).ref]);
-  if (add.code !== 0) return fail(`worktree_failed: ${add.stderr.trim()}`);
-  created.push(plan.wt);
+  // The same locked plan + worktree claim as a real chunk, so parallel dry runs never share a worktree path.
+  const { plan, error } = await ctx.repoLock(async () => {
+    const plan = await planChunk(ctx, chunk, lastBranch);
+    ledger.log("chunk_start", { chunk: chunk.id, dryRun: true, branch: plan.branch, base: plan.base, wt: plan.wt });
+    const fetchErr = await fetchTrunk(ctx);
+    if (fetchErr !== null) return { plan, error: `fetch_failed: ${fetchErr.trim()}` };
+    const add = await git(run.repo, ["worktree", "add", "--detach", plan.wt, (await trunkBase(run)).ref]);
+    if (add.code !== 0) return { plan, error: `worktree_failed: ${add.stderr.trim()}` };
+    created.push(plan.wt);
+    return { plan, error: null };
+  });
+  if (error !== null) return fail(error);
   if (index === 0) {
     const setupErr = await runSetupCommand(ctx, chunk.id, plan.wt);
     if (setupErr !== null) return fail(`setup_failed: ${setupErr}`);

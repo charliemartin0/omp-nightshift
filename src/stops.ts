@@ -24,21 +24,24 @@ export function bst(ms: number): string {
   }).format(ms);
 }
 
-/** `omp usage --json` (read-only, zero model tokens) -> evaluateQuota; logs a `quota` event. */
-export async function checkQuota(ctx: Ctx): Promise<QuotaResult> {
+/** `omp usage --json` (read-only, zero model tokens) -> evaluateQuota; logs a `quota` event (tagged with the asking chunk). */
+export async function checkQuota(ctx: Ctx, chunk?: string): Promise<QuotaResult> {
   const res = evaluateQuota(await ctx.readUsage(), ctx.run.floors, ctx.buildProviders, ctx.run.reservePct);
   ctx.ledger.log(
     "quota",
-    res.ok
-      ? { ok: true, floors: ctx.run.floors }
-      : {
-          ok: false,
-          reason: res.reason,
-          detail: res.detail,
-          ...(res.reason === "quota_wait"
-            ? { provider: res.provider, window: res.window, resetsAt: new Date(res.resetsAt).toISOString() }
-            : {}),
-        },
+    {
+      ...(chunk ? { chunk } : {}),
+      ...(res.ok
+        ? { ok: true, floors: ctx.run.floors }
+        : {
+            ok: false,
+            reason: res.reason,
+            detail: res.detail,
+            ...(res.reason === "quota_wait"
+              ? { provider: res.provider, window: res.window, resetsAt: new Date(res.resetsAt).toISOString() }
+              : {}),
+          }),
+    },
   );
   return res;
 }
@@ -79,8 +82,8 @@ export async function waitForQuota(ctx: Ctx, first: QuotaResult): Promise<Stop |
   }
 }
 
-/** Deadline, no-progress and run-token safety limits, then max PRs, consecutive failures and quota. */
-export async function checkStop(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number): Promise<Stop | null> {
+/** Deadline, no-progress and run-token safety limits, then max PRs and consecutive failures (Extract Method; no quota). */
+function checkLimits(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number): Stop | null {
   const now = ctx.clock.now();
   const d = deadline(ctx);
   const left = d.atMs - now;
@@ -97,5 +100,23 @@ export async function checkStop(ctx: Ctx, chunks: Chunk[], consecutiveFailures: 
   if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
     return { reason: "consecutive_failures", detail: `${consecutiveFailures} failed in a row` };
   }
-  return waitForQuota(ctx, await checkQuota(ctx));
+  return null;
+}
+
+/** Deadline, no-progress and run-token safety limits, then max PRs, consecutive failures and quota. */
+export async function checkStop(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number): Promise<Stop | null> {
+  return checkLimits(ctx, chunks, consecutiveFailures) ?? waitForQuota(ctx, await checkQuota(ctx));
+}
+
+/**
+ * checkStop while `running` chunks are in flight, without ever sleeping: a quota wait, or running chunks that could
+ * still reach maxPrs, holds dispatch until one of them finishes.
+ */
+export async function checkDispatch(ctx: Ctx, chunks: Chunk[], consecutiveFailures: number, running: number): Promise<Stop | "hold" | null> {
+  const stop = checkLimits(ctx, chunks, consecutiveFailures);
+  if (stop) return stop;
+  if (chunks.filter((c) => c.status === "passed" || c.status === "flaky").length + running >= ctx.run.maxPrs) return "hold";
+  const q = await checkQuota(ctx);
+  if (q.ok) return null;
+  return q.reason === "quota_wait" ? "hold" : { reason: q.reason, detail: q.detail };
 }

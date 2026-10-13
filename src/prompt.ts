@@ -33,6 +33,9 @@ export function renderChunkPrompt(run: RunJson, chunk: Chunk, ctx: PromptCtx): s
   const prod = chunk.prodCode
     ? "Production code changes are allowed only as the chunk scope requires."
     : "Do NOT change production code; only add or fix tests and test fixtures/config.";
+  const parallel = run.concurrency > 1
+    ? `\nOther overnight chunks run at the same time in their own worktrees: only change files inside ${ctx.wt}, and never touch another worktree or branch.`
+    : "";
   return `You are running UNATTENDED overnight for the operator. Nobody will answer questions.
 - Never use the ask tool, never wait for input, never pause for confirmation.
 - Environment problem (a tool, browser, MCP server, service or permission that is missing or fails to start): write one line \`BLOCKED: env: <reason>\` to ${ctx.wt}/.overnight-status and stop immediately. Do not commit that file.
@@ -45,7 +48,7 @@ Done when: ${chunk.doneWhen}
 Proof command (must pass from the worktree root): ${chunk.test}
 Production code: ${prod}
 
-Workspace: ${ctx.wt} (git worktree). Branch \`${ctx.branch}\` already exists and is checked out, based on \`${ctx.base}\`. Stay on it. Never check out ${run.trunk}.
+Workspace: ${ctx.wt} (git worktree). Branch \`${ctx.branch}\` already exists and is checked out, based on \`${ctx.base}\`. Stay on it. Never check out ${run.trunk}.${parallel}
 Follow the repo AGENTS.md and ~/.omp/agent/AGENTS.md for commits and PRs, with these specifics:
 ${forgeBlock(run, ctx)}
 Before finishing: run the proof command yourself until it passes, leave \`git status\` clean, and make sure the latest commit is pushed to the draft PR (when a PR is required).

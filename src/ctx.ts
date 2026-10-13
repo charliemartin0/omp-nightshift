@@ -12,6 +12,18 @@ export interface Clock {
 
 export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) };
 
+/** Runs callers one at a time in call order; a rejection does not block later callers. */
+export type Lock = <T>(fn: () => Promise<T>) => Promise<T>;
+
+export function makeLock(): Lock {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (fn) => {
+    const run = tail.then(fn);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
 export interface Ctx {
   run: RunJson;
   dryRun: boolean;
@@ -25,8 +37,13 @@ export interface Ctx {
   clock: Clock;
   /** `omp usage --json` parsed; null when unparseable */
   readUsage(): Promise<unknown>;
-  /** chunk currently in status `running` (for the signal handler / crash path) */
-  running: string | null;
+  /** chunks currently in status `running` (for the signal handler / crash path) */
+  running: Set<string>;
+  /**
+   * Serialises the runner's shared-repository Git steps (fetch, branch + worktree creation, gt track) across parallel
+   * chunks, so they never race each other or claim the same branch or worktree path.
+   */
+  repoLock: Lock;
   backlog: string;
   overlay: string;
   logs: string;
@@ -70,7 +87,8 @@ export function makeCtx(run: RunJson, dryRun: boolean): Ctx {
         return null;
       }
     },
-    running: null,
+    running: new Set(),
+    repoLock: makeLock(),
     backlog,
     overlay: join(run.runDir, "overlay.yml"),
     logs,

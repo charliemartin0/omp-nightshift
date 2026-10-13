@@ -74,23 +74,22 @@ export async function runSetupCommand(ctx: Ctx, chunkId: string, wt: string): Pr
   return r.code === 0 && !r.timedOut ? null : `${r.timedOut ? "timed out" : `exit ${r.code}`}; see logs/${chunkId}-setup.log`;
 }
 
-/** Fetch, create branch + worktree, gt track, setupCommand. Returns startSha. Throws SetupFailure. */
-async function setupChunk(ctx: Ctx, plan: ChunkPlan): Promise<string> {
+/** Fetch, create branch + worktree, gt track: the shared-repository steps. Returns a failure, or null on success. */
+async function createWorktree(ctx: Ctx, plan: ChunkPlan): Promise<SetupFailure | null> {
   const { run } = ctx;
   const fetchErr = await fetchTrunk(ctx);
-  if (fetchErr !== null) throw new SetupFailure("fetch_failed", fetchErr);
-  const add = await git(run.repo, ["worktree", "add", "-b", plan.branch, plan.wt, plan.base]);
-  if (add.code !== 0) throw new SetupFailure("worktree_failed", add.stderr);
+  if (fetchErr !== null) return new SetupFailure("fetch_failed", fetchErr);
+  // --no-track: no upstream write to the shared .git/config, which agents' `git push -u` may hold locked.
+  const add = await git(run.repo, ["worktree", "add", "--no-track", "-b", plan.branch, plan.wt, plan.base]);
+  if (add.code !== 0) return new SetupFailure("worktree_failed", add.stderr);
   if (run.forge === "graphite") {
     const t = await spawnGroup(["gt", "track", "--no-interactive", "--parent", plan.prBase, plan.branch], {
       cwd: plan.wt,
       timeoutMs: 120_000,
     });
-    if (t.code !== 0) throw new SetupFailure("gt_track_failed", t.stderr || t.stdout);
+    if (t.code !== 0) return new SetupFailure("gt_track_failed", t.stderr || t.stdout);
   }
-  const setupErr = await runSetupCommand(ctx, plan.chunk.id, plan.wt);
-  if (setupErr !== null) throw new SetupFailure("setup_failed", setupErr);
-  return gitOut(plan.wt, ["rev-parse", "HEAD"]);
+  return null;
 }
 
 function readBlocked(wt: string): string | null {
@@ -144,7 +143,7 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
   const gateInput = { ctx, chunk, wt, branch: plan.branch, startSha, prBase: plan.prBase, slug };
   let gate = await runGate(gateInput);
   if (!gate.ok) {
-    const q = await checkQuota(ctx);
+    const q = await checkQuota(ctx, chunk.id);
     if (!q.ok && q.reason === "quota_wait") {
       return { status: "pending", note: `requeued: gate failed, then quota_wait: ${q.detail}`, requeue: true };
     }
@@ -165,28 +164,35 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
 
 /** Full lifecycle of one chunk; always ends with a backlog status update and a `chunk_end` ledger line. */
 export async function runChunk(ctx: Ctx, chunk: Chunk, lastBranch: string | null): Promise<Outcome & { branch: string }> {
-  const plan = await planChunk(ctx, chunk, lastBranch);
+  // Planning picks a free branch and worktree path that `git worktree add` then claims: one locked step, so parallel
+  // chunks never take the same names and the runner's fetch, ref and gt track updates never race each other.
+  // setupCommand runs unlocked.
+  const { plan, failure } = await ctx.repoLock(async () => {
+    const plan = await planChunk(ctx, chunk, lastBranch);
+    return { plan, failure: await createWorktree(ctx, plan) };
+  });
   let startSha = "";
   const end = async (o: Outcome) => {
     const files = startSha ? (await git(plan.wt, ["diff", "--name-only", `${startSha}..HEAD`])).stdout.split("\n").filter(Boolean) : [];
     ctx.setStatus(chunk.id, o.status, o.note);
-    ctx.running = null;
+    ctx.running.delete(chunk.id);
     ctx.ledger.log("chunk_end", { chunk: chunk.id, status: o.status, note: o.note, changedFiles: files });
     return { ...o, branch: plan.branch };
   };
 
-  try {
-    startSha = await setupChunk(ctx, plan);
-  } catch (e) {
-    if (e instanceof SetupFailure) return end(["fetch_failed", "setup_failed"].includes(e.reason)
-      ? { status: "blocked", note: `env: ${e.message}` }
-      : { status: "failed", note: e.message });
-    throw e;
+  let setup = failure;
+  if (!setup) {
+    const setupErr = await runSetupCommand(ctx, chunk.id, plan.wt);
+    if (setupErr !== null) setup = new SetupFailure("setup_failed", setupErr);
   }
+  if (setup) return end(["fetch_failed", "setup_failed"].includes(setup.reason)
+    ? { status: "blocked", note: `env: ${setup.message}` }
+    : { status: "failed", note: setup.message });
+  startSha = await gitOut(plan.wt, ["rev-parse", "HEAD"]);
   writeFileSync(join(ctx.prompts, `${chunk.id}.md`), renderChunkPrompt(ctx.run, chunk, plan));
   mkdirSync(sessionsDir(ctx, chunk.id), { recursive: true });
   ctx.setStatus(chunk.id, "running", "");
-  ctx.running = chunk.id;
+  ctx.running.add(chunk.id);
   ctx.ledger.log("chunk_start", { chunk: chunk.id, branch: plan.branch, base: plan.base, wt: plan.wt });
   return end(await executeChunk(ctx, plan, startSha));
 }

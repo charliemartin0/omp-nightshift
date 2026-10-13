@@ -2,9 +2,9 @@
 
 Unattended overnight agent for [omp](https://github.com/can1357/oh-my-pi). In any repo type
 `/skill:overnight <goal>`: the skill plans a backlog of small, test-proven chunks with you, then a detached
-systemd user unit works through it (one omp session per chunk, an independent gate, draft PRs) and writes a
-morning report. Bun TypeScript, no npm dependencies. The runner delegates delivery to omp: local mode
-keeps branches local; GitHub and Graphite modes can push and open draft PRs.
+systemd user unit works through it (one omp session per chunk, optionally up to three chunks in parallel, an
+independent gate, draft PRs) and writes a morning report. Bun TypeScript, no runtime npm dependencies. The runner
+delegates delivery to omp: local mode keeps branches local; GitHub and Graphite modes can push and open draft PRs.
 
 ## Requirements
 
@@ -41,7 +41,8 @@ Delivery follows that repository's instructions; choose local branches unless yo
 - `trunk [--repo <path>]` trunk branch (Graphite config, else `origin/HEAD`, else `main`)
 - `estimate <backlog.md>` pending-chunk estimate from history: median/p90 finish, expected quota waits, recommended safety cap
 
-`bun test` runs the unit tests from the source checkout. The package remains `private: true`
+`bun test` runs the unit tests from the source checkout; `bun install && bun run typecheck` type-checks `src` and
+`test` with the dev-only TypeScript and Bun type packages (running the tool needs neither). The package remains `private: true`
 because installation is from Git, not npm; this does not affect GitHub repository visibility.
 
 ## Safety and dry runs
@@ -98,6 +99,27 @@ The run stops within 20 min of the effective deadline with `safety_cap` or `stop
 are not progress), after three identical normalised failure notes (chunk ids/digits removed), or when run
 tokens exceed `tokenCap × chunk count`. Existing max-PR, consecutive-failure and quota limits still apply.
 `status` shows the latest stop reason, finish estimate, safety cap and optional override.
+
+## Parallel chunks
+
+`concurrency` in `run.json` (default 1, max 3) runs that many pending chunks at once, in backlog order. It requires
+`prMode: independent`, because stack mode bases each branch on the previous chunk's branch. Every chunk gets its own
+branch and worktree. The runner's own shared-repository steps (planning, fetch, `git worktree add --no-track`,
+`gt track`) run one chunk at a time, so parallel chunks never claim the same branch or worktree path. Setup commands,
+agents and gate tests then run side by side, and agents' own Git and `gt` commands are not serialised: they share the
+repository's refs, object store and Graphite metadata as well as local services and ports. Choose more than 1 only
+when the chunks' tests can run at the same time; an agent's fetch holding a trunk ref lock can still make another
+chunk's fetch fail (an environment block, retried once like any other).
+
+A stop condition or runner error only ends dispatch. Running chunks finish first (each is bounded by the deadline),
+so no chunk is left `running`, and self-review and the report run once at the end with final outcomes. A chunk that
+hits a runner error is marked `failed` with its own error at once, not after the others finish. While chunks
+run, a quota wait holds dispatch instead of sleeping, and so do running chunks that could still reach `maxPrs`.
+Once idle, the runner waits out quota windows as before. A quota-requeued chunk reruns in a fresh worktree, never
+alongside itself. Environment-blocked chunks are rechecked only when nothing is running, and SIGTERM marks every
+running chunk `stopped`. Each ledger line is one append tagged with its `chunk`, so events from parallel chunks
+interleave without tearing and stay attributable. The finish estimate still assumes one chunk at a time, so the
+default safety cap stays conservative.
 
 ## Preflight
 

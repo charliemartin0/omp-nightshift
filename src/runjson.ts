@@ -26,6 +26,8 @@ export interface RunJson {
   stopAt?: string;
   safetyCap?: string;
   selfReview: boolean;
+  /** chunks run at the same time, each in its own worktree (1-MAX_CONCURRENCY; >1 needs independent PR mode) */
+  concurrency: number;
   maxPrs: number;
   floors: Record<string, number>;
   /** omp's `retry.usageReservePct` for the run overlay (percent left below which omp switches models) */
@@ -37,6 +39,7 @@ export interface RunJson {
 }
 
 export const RESERVE_PCT_DEFAULT = 40;
+export const MAX_CONCURRENCY = 3;
 
 export const LIMIT_DEFAULTS: Limits = {
   maxTime: "90m",
@@ -48,9 +51,9 @@ export const LIMIT_DEFAULTS: Limits = {
 
 const TOP_KEYS = [
   "version", "repo", "repoName", "date", "goal", "runDir", "worktreeRoot", "unit", "remote", "trunk", "forge",
-  "prMode", "stopAt", "safetyCap", "selfReview", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
+  "prMode", "stopAt", "safetyCap", "selfReview", "concurrency", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
 ];
-const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview"];
+const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview", "concurrency"];
 const MODEL_KEYS = ["plan", "build", "report"];
 
 export function sanitizeRepoName(name: string): string {
@@ -131,6 +134,9 @@ export function validateRunJson(x: unknown): RunJson {
   num(l.testTimeoutMinutes, "limits.testTimeoutMinutes", 1);
   if (o.safetyCap !== undefined) parseDuration(str(o, "safetyCap"));
   if (o.selfReview !== undefined && typeof o.selfReview !== "boolean") throw new Error("run.json: selfReview must be boolean");
+  const concurrency = o.concurrency === undefined ? 1 : num(o.concurrency, "concurrency", 1, MAX_CONCURRENCY, true);
+  // Stack mode bases each chunk on the previous one's branch, so its chunks cannot run side by side.
+  if (concurrency > 1 && prMode === "stack") throw new Error("run.json: concurrency > 1 requires prMode independent");
 
   return {
     version: 1,
@@ -148,6 +154,7 @@ export function validateRunJson(x: unknown): RunJson {
     stopAt: o.stopAt === undefined ? undefined : str(o, "stopAt", /^([01]\d|2[0-3]):[0-5]\d$/),
     safetyCap: o.safetyCap === undefined ? undefined : str(o, "safetyCap"),
     selfReview: o.selfReview === undefined ? false : o.selfReview as boolean,
+    concurrency,
     maxPrs: num(o.maxPrs, "maxPrs", 1, Infinity, true),
     floors,
     reservePct: o.reservePct === undefined ? RESERVE_PCT_DEFAULT : num(o.reservePct, "reservePct", 0, 99, true),

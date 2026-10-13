@@ -1,1 +1,14 @@
-{"name":"omp-nightshift","private":true,"license":"MIT","type":"module","scripts":{"test":"bun test"}}
+{
+  "name": "omp-nightshift",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2"
+  }
+}
