@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { type Ctx, deadline } from "./ctx";
 import { openAppend, readLines, settle, startGroup } from "./proc";
 import { parseDuration } from "./runjson";
+import { sweepLogger } from "./sweep";
 import { GapDetector, SUSPEND_GAP_MS } from "./suspend";
 import { QUOTA_ERROR_RE, type Trip, Watchdog } from "./watchdog";
 
@@ -161,6 +162,9 @@ export async function runOmp(
     })(),
   ]);
   const code = await g.exited;
+  // Orphans of the session (dev servers, browsers) must not outlive it: they would fail the next phase's ports.
+  const swept = await g.sweep(true);
+  sweepLogger(ctx, "agent", o.chunk)(swept);
   await settle(pumps, 3000); // a stray grandchild must not hold us here
   clearInterval(tick);
   closeSync(out);
@@ -172,6 +176,6 @@ export async function runOmp(
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip, tokens: wd.tokens });
   }
   const quotaError = wd.lastError !== null && QUOTA_ERROR_RE.test(wd.lastError) ? wd.lastError : null;
-  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError });
+  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError, swept: swept.found });
   return { code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError, elapsedMs: now() - t0 - suspendMs, hardMs, suspendMs };
 }

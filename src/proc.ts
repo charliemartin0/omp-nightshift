@@ -3,6 +3,7 @@
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import type { FileSink } from "bun";
+import { type SweepResult, sweepGroup } from "./sweep";
 import { guardTimeout } from "./suspend";
 
 export const GRACE_MS = 15_000;
@@ -31,6 +32,8 @@ export interface Group {
   exited: Promise<number>;
   /** SIGTERM the group, wait up to GRACE_MS for the leader, then SIGKILL the group. */
   kill(): Promise<void>;
+  /** After the leader exited: stop any stragglers of its process group (and, when `deep`, session). */
+  sweep(deep?: boolean): Promise<SweepResult>;
 }
 
 function signalGroup(pid: number, sig: NodeJS.Signals, leaderAlive: () => boolean): void {
@@ -78,6 +81,7 @@ export function startGroup(argv: string[], o: { cwd?: string; env?: Record<strin
     stdin: o.stdin === "pipe" ? proc.stdin as FileSink : null,
     exited: raw.then((code) => (shuttingDown ? new Promise<number>(() => {}) : code)),
     kill: () => terminate(pid, raw, () => alive),
+    sweep: (deep = false) => sweepGroup(pid, { deep }),
   };
 }
 
@@ -114,6 +118,10 @@ export interface SpawnOpts {
   timeoutMs?: number;
   /** Called with the gap (ms) each time a host suspend was excluded from `timeoutMs`. */
   onSuspend?: (gapMs: number) => void;
+  /** Stragglers of the command's process group are stopped when it exits: `false` to keep them, `"deep"` to also sweep its session. */
+  sweep?: boolean | "deep";
+  /** Called when a sweep found leftover processes. */
+  onSweep?: (r: SweepResult) => void;
   /** Append stdout+stderr here (header line `$ argv`). */
   logFile?: string;
 }
@@ -122,6 +130,8 @@ export interface SpawnResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  /** leftover processes stopped after the command exited */
+  swept: number;
 }
 
 async function drain(stream: ReadableStream<Uint8Array>, sink: { text: string }, fd: number | null): Promise<void> {
@@ -154,9 +164,15 @@ export async function spawnGroup(argv: string[], o: SpawnOpts = {}): Promise<Spa
   const err = { text: "" };
   const drained = Promise.all([drain(g.stdout, out, fd), drain(g.stderr, err, fd)]);
   const code = await g.exited;
+  cancelTimeout?.();
+  let swept = 0;
+  if (o.sweep !== false) {
+    const s = await g.sweep(o.sweep === "deep");
+    swept = s.found;
+    if (s.found > 0) o.onSweep?.(s);
+  }
   // A daemonised grandchild outside the group could hold the pipes open; do not wait on it forever.
   await settle(drained, 3000);
-  cancelTimeout?.();
   if (fd !== null) closeSync(fd);
-  return { code, timedOut, stdout: out.text, stderr: err.text };
+  return { code, timedOut, stdout: out.text, stderr: err.text, swept };
 }
