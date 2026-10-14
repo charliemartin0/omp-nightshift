@@ -1,9 +1,13 @@
 export type Floors = Record<string, number>;
 
+/**
+ * There is no quota stop: a chain that cannot be used right now is a `quota_wait`, with the earliest time something
+ * becomes usable again (`resetsAt`, null when no window reports one). `quota_unknown` means usage cannot be read at all.
+ */
 export type QuotaResult =
   | { ok: true }
-  | { ok: false; reason: "quota_floor" | "quota_limit_reached" | "quota_unknown"; detail: string }
-  | { ok: false; reason: "quota_wait"; detail: string; provider: string; window: string; resetsAt: number };
+  | { ok: false; reason: "quota_unknown"; detail: string }
+  | { ok: false; reason: "quota_wait"; detail: string; provider: string; window: string; resetsAt: number | null };
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
@@ -39,7 +43,18 @@ function best7d(mine: Obj[]): number | null {
   return best;
 }
 
-/** Legacy hard stop used only when there is no build chain to fall back on. */
+/** Earliest reset of a provider's 7d windows: when an account that is under its floor can recover. */
+function reset7d(mine: Obj[]): Unblock | null {
+  let first: Unblock | null = null;
+  for (const r of mine) {
+    for (const w of windowsOf(r)) {
+      if (w.id === "7d" && w.resetsAt !== null && (!first || w.resetsAt < first.at)) first = { at: w.resetsAt, window: "7d" };
+    }
+  }
+  return first;
+}
+
+/** Floors alone, used when there is no build chain to fall back on: under a floor the run waits for that 7d reset. */
 function checkFloors(reports: Obj[], floors: Floors): QuotaResult {
   for (const [provider, floor] of Object.entries(floors)) {
     const mine = reports.filter((r) => r.provider === provider);
@@ -47,7 +62,11 @@ function checkFloors(reports: Obj[], floors: Floors): QuotaResult {
     const best = best7d(mine);
     if (best === null) return { ok: false, reason: "quota_unknown", detail: `${provider}: no 7d remainingFraction` };
     if (best < floor) {
-      return { ok: false, reason: "quota_floor", detail: `${provider} 7d ${best.toFixed(2)} < ${floor.toFixed(2)}` };
+      const reset = reset7d(mine);
+      return {
+        ok: false, reason: "quota_wait", provider, window: "7d", resetsAt: reset?.at ?? null,
+        detail: `${provider} 7d ${best.toFixed(2)} < ${floor.toFixed(2)}`,
+      };
     }
   }
   return { ok: true };
@@ -76,17 +95,17 @@ function blockage(report: Obj, reserve: number): { windows: string[]; unblock: U
   if (!blocking.length) return { windows, unblock: null };
   let latest: Unblock | null = null;
   for (const w of blocking) {
-    if (w.id === "7d" || w.resetsAt === null) return { windows, unblock: null };
+    if (w.resetsAt === null) return { windows, unblock: null };
     if (!latest || w.resetsAt > latest.at) latest = { at: w.resetsAt, window: w.id };
   }
   return { windows, unblock: latest };
 }
 
 /**
- * A build-chain provider is unusable when its best 7d is under its floor (never recovers tonight), or when every
- * account is limitReached / at or below the reserve. Any usable provider -> ok. All unusable -> `quota_wait` if
- * one recovers on a short window, else a hard stop (`quota_floor` if a floor was involved, else
- * `quota_limit_reached`). Providers outside the chain never stop the run. With no chain, floors are hard stops.
+ * A build-chain provider is unusable when its best 7d is under its floor, or when every account is limitReached / at
+ * or below the reserve. Any usable provider -> ok. All unusable -> `quota_wait` until the earliest reset of any of them
+ * (a 7d window included: a weekly reset can be days away, the run still waits instead of stopping). Providers outside
+ * the chain are ignored. With no chain, a floor breach is a `quota_wait` on that 7d reset.
  */
 export function evaluateQuota(usage: unknown, floors: Floors, chain: string[], reservePct: number): QuotaResult {
   const reports = isObj(usage) && Array.isArray(usage.reports) ? usage.reports.filter(isObj) : [];
@@ -100,7 +119,7 @@ export function evaluateQuota(usage: unknown, floors: Floors, chain: string[], r
     const floor = floors[provider];
     const best = best7d(mine);
     if (floor !== undefined && best !== null && best < floor) {
-      unusable.push({ provider, unblock: null, desc: `${provider} 7d ${best.toFixed(2)} < ${floor.toFixed(2)}`, floor: true });
+      unusable.push({ provider, unblock: reset7d(mine), desc: `${provider} 7d ${best.toFixed(2)} < ${floor.toFixed(2)}`, floor: true });
       continue;
     }
     const blocks = mine.map((r) => blockage(r, reserve));
@@ -121,10 +140,14 @@ export function evaluateQuota(usage: unknown, floors: Floors, chain: string[], r
     if (u.unblock && (!first || u.unblock.at < first.unblock.at)) first = { provider: u.provider, unblock: u.unblock };
   }
   if (!first) {
+    // nothing reports a reset time: still a wait (re-checked periodically), never a stop
     return {
       ok: false,
-      reason: unusable.some((u) => u.floor) ? "quota_floor" : "quota_limit_reached",
-      detail: `build chain unusable: ${unusable.map((u) => u.desc).join(", ")}`,
+      reason: "quota_wait",
+      detail: `build chain unusable, no reset time reported: ${unusable.map((u) => u.desc).join(", ")}`,
+      provider: unusable[0]?.provider ?? "unknown",
+      window: "unknown",
+      resetsAt: null,
     };
   }
   return {

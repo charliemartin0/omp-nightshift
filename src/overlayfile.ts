@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildChainProviders, buildOverlay } from "./overlay";
+import { assertNoFreeModels, buildChainProviders, buildOverlay } from "./overlay";
 import { spawnGroup } from "./proc";
 import type { RunJson } from "./runjson";
 
@@ -24,6 +24,7 @@ export async function writeOverlay(run: RunJson): Promise<{ path: string; buildP
   for (const [k, v] of await configEntries(run.repo, "retry.fallbackChains")) {
     if (Array.isArray(v)) chains[k] = v.filter((m): m is string => typeof m === "string");
   }
+  assertNoFreeModels(run.models, roles);
   const file = join(run.runDir, "overlay.yml");
   mkdirSync(run.runDir, { recursive: true });
   writeFileSync(file, buildOverlay(roles, chains, run.reservePct));

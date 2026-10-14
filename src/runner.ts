@@ -16,8 +16,12 @@ import { loadRunJson } from "./runjson";
 import { type Stop, checkDispatch, checkStop, IDENTICAL_FAILURE_LIMIT, MAX_CONSECUTIVE_FAILURES, STOP_MARGIN_MS } from "./stops";
 import { markInterrupted, recoverSetup } from "./setup";
 
-/** A chunk killed by a quota error returns to pending at most this many times before it counts as failed. */
-export const MAX_QUOTA_REQUEUES = 3;
+/**
+ * A chunk killed by a quota error returns to pending at most this many times, with a growing pause, before it is marked
+ * failed. Quota deaths never count towards the consecutive-failure stop: quota is a reason to wait, not to stop.
+ */
+export const MAX_QUOTA_REQUEUES = 6;
+export const requeueBackoffMs = (n: number): number => Math.min(10 * 60_000, 60_000 * 2 ** (n - 1));
 
 /** Refresh the finish estimate while keeping the launch's fixed safety cap. */
 export function logEstimate(ctx: Ctx): void {
@@ -62,8 +66,14 @@ export async function loop(
   let stop: Stop | null = null;
   let error: { cause: unknown } | null = null;
 
+  const backoff = new Map<string, number>();
   const start = async (chunk: Chunk, sequence: number): Promise<Done> => {
     try {
+      const pause = backoff.get(chunk.id);
+      if (pause) {
+        backoff.delete(chunk.id);
+        await ctx.clock.sleep(pause); // usage may look healthy while the provider still refuses: do not spin
+      }
       if (ctx.dryRun) return { chunk, sequence, kind: "dry", branch: await dryRunChunk(ctx, chunk, dryIndex++, lastBranch, dryWorktrees) };
       return { chunk, sequence, kind: "run", out: await run(ctx, chunk, lastBranch) };
     } catch (cause) {
@@ -102,8 +112,12 @@ export async function loop(
     if (out.requeue) {
       const n = (requeues.get(chunk.id) ?? 0) + 1;
       requeues.set(chunk.id, n);
-      if (n < MAX_QUOTA_REQUEUES) seen.delete(chunk.id);
-      else {
+      if (n < MAX_QUOTA_REQUEUES) {
+        // quota death, not a failure; the requeued attempt starts after a growing pause in a fresh worktree
+        seen.delete(chunk.id);
+        backoff.set(chunk.id, requeueBackoffMs(n));
+        ctx.ledger.log("quota_requeue", { chunk: chunk.id, attempt: n, backoffSec: requeueBackoffMs(n) / 1000 });
+      } else {
         out = { status: "failed", note: `quota error ${n}x: ${out.note}`, branch: out.branch };
         ctx.setStatus(chunk.id, out.status, out.note);
       }
@@ -113,7 +127,7 @@ export async function loop(
     while (completed.has(nextAccount)) {
       const { chunk: accounted, out: result } = completed.get(nextAccount)!;
       completed.delete(nextAccount++);
-      if (result.status === "failed") {
+      if (result.status === "failed" && !result.note.startsWith("quota error ")) {
         failures++;
         const note = result.note.replace(new RegExp(`(?<![\\w-])${accounted.id}(?!\\w)`, "g"), "<id>").replace(/\d+/g, "#");
         const n = (failureNotes.get(note) ?? 0) + 1;

@@ -79,7 +79,7 @@ One batched `ask`; the first option is the recommended default.
 - Run limit: `Safety cap <safetyCap> (2× p90 estimate)` (recommended) / `Safety cap + stop at 07:00` / `Safety cap + stop at 08:00`.
 - Self-review pass after the backlog: `Off` (recommended) / `On`.
 - Max PRs: `4` / `2` / `6`.
-- Quota floors (7d remaining): `Anthropic 7d >=25%, OpenAI >=50%, others >=25%` / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
+- Quota floors (7d remaining): `Anthropic 7d >=20%, OpenAI >=40%, others >=20%` (recommended) / `Anthropic >=40%, OpenAI >=60%, others >=40%` / `Anthropic >=15%, OpenAI >=30%, others >=15%`. Floors mark a provider unusable (omp falls back to the next one; if every provider is unusable the run waits for the earliest reset, it never stops) and apply to every provider in `omp usage --json` that reports a `7d` window (today `anthropic`, `openai-codex`, `opencode-go`); providers without a 7d window (e.g. `cursor`, monthly) get no floor and are governed by the reserve. Provider ids as in `omp usage --json`.
 - Fallback reserve (omp switches models below this % left; interactive uses 15): `40%` / `30%` / `60%` (-> `reservePct` 40/30/60).
 - Models: `plan @default, build @smol` / `plan @default, build @default` / `plan @smol, build @smol`.
 - PR mode: `Independent drafts off <trunk>` / `One stack`.
@@ -94,7 +94,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `H
 { "version": 1, "repo": "/abs", "repoName": "x", "date": "YYYY-MM-DD", "goal": "...",
   "runDir": "/abs", "worktreeRoot": "/abs", "unit": "omp-overnight-<repoName>-<date>",
   "remote": "origin", "trunk": "main", "forge": "graphite|github|local", "prMode": "independent|stack",
-  "safetyCap": "<from estimate>", "selfReview": false, "concurrency": 1, "maxPrs": 4, "floors": { "anthropic": 0.25, "openai-codex": 0.5, "opencode-go": 0.25 }, "reservePct": 40,
+  "safetyCap": "<from estimate>", "selfReview": false, "concurrency": 1, "maxPrs": 4, "floors": { "anthropic": 0.2, "openai-codex": 0.4, "opencode-go": 0.2 }, "reservePct": 40,
   "models": { "plan": "@default", "build": "@smol", "report": "@smol" },
   "setupCommand": "", "preflightTest": "<cmd>",
   "limits": { "maxTime": "90m", "resumeMaxTime": "45m", "stallMinutes": 10, "tokenCap": 3000000, "testTimeoutMinutes": 20 } }
@@ -111,5 +111,6 @@ Show a summary: goal, forge, trunk, PR mode, parallel chunks, the estimate line,
 
 - Never run `CLI run`. Never run chunk work, `gt`, `gh pr`, or push from this session.
 - Never remove worktrees, branches, or PRs.
-- A provider under its 7d floor is skipped, not fatal: the run continues on other providers in the build chain. If every chain provider is unusable, a short-window (5h) reset makes the runner wait for it; otherwise (7d floors only) the run stops.
+- A provider under its 7d floor is skipped, not fatal: the run continues on other providers in the build chain. If every chain provider is unusable the runner waits for the earliest reset (a 5h window or a weekly 7d reset); quota never stops a run. The wait does not use up the safety cap; only an explicit `stopAt` ends it.
+- Free-tier models (`...-free`, `...:free`) are never used: the overlay drops them from every fallback chain and `launch` rejects a run whose `models` resolve to one.
 - Environment-blocked chunks get one automatic preflight recheck and retry per runner process; human gates do not. After fixing a remaining block, relaunch with `CLI launch <runDir>/run.json --retry-blocked` (resets every blocked chunk to pending).
