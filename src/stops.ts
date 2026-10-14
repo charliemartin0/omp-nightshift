@@ -1,6 +1,7 @@
 import type { Chunk } from "./backlog";
 import { type Ctx, deadline } from "./ctx";
 import { type QuotaResult, evaluateQuota } from "./quota";
+import { SUSPEND_GAP_MS } from "./suspend";
 
 export const STOP_MARGIN_MS = 20 * 60_000;
 export const MAX_CONSECUTIVE_FAILURES = 2;
@@ -79,7 +80,10 @@ export async function waitForQuota(ctx: Ctx, first: QuotaResult): Promise<Stop |
       logged = q.resetsAt;
     }
     if (ctx.dryRun) return { reason: "quota_wait", detail: q.detail };
-    await ctx.clock.sleep(Math.min(QUOTA_RECHECK_MS, until - now));
+    const slept = Math.min(QUOTA_RECHECK_MS, until - now);
+    await ctx.clock.sleep(slept);
+    const late = ctx.clock.now() - now - slept; // a sleep that overshoots by minutes means the host was suspended
+    if (late >= SUSPEND_GAP_MS) ctx.noteSuspend(late, "quota_wait");
     if (target > now) ctx.progressAt = ctx.clock.now();
     q = await checkQuota(ctx);
   }

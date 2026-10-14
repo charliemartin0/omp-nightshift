@@ -145,6 +145,14 @@ Advanced/dirty, ignored-file-bearing, agent-started, explicitly completed/failed
 resources are retained with a `setup_recovered` explanation. Recovery is idempotent; dry runs never authorize removal
 of real resources. Signal stops still skip self-review and report generation. Dry cleanup failures retain the refused
 worktree, continue the remaining cleanup, and still produce a runner-error report.
+## Host suspend
+
+A sleeping host (Windows/WSL sleep, a closed lid) must not look like a hung agent. The agent watchdog, the setup and
+gate test timeouts and quota sleeps all detect a timer that fires 90 s or more late, subtract that gap, and log a
+`host_suspend {where, gapSec}` ledger event. The gap is also removed from the safety cap and the no-progress timer;
+an explicit `stopAt` stays wall-clock. Watchdog trips now say which limit fired, for example
+`watchdog timeout: ran 12 min awake against a 95 min wall-clock limit, 300 min host suspend excluded; 473629 of
+3000000 tokens (cap not reached)`, so a timeout is never reported as a token cap.
 
 ## Preflight
 

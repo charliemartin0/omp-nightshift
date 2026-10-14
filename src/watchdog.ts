@@ -47,6 +47,12 @@ export class Watchdog {
     this.last = now;
   }
 
+  /** Exclude a host-suspend gap: neither the hard limit nor the stall timer may count time the host was asleep. */
+  shift(gapMs: number): void {
+    this.start += gapMs;
+    this.last += gapMs;
+  }
+
   check(now: number): Trip | null {
     if (this.tokens >= this.tokenCap) return "token_cap";
     if (now - this.start >= this.hardMs) return "timeout";

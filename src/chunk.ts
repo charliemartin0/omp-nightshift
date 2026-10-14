@@ -37,6 +37,16 @@ export interface Outcome {
   requeue?: boolean;
 }
 
+/** Unambiguous trip cause: names the limit that fired and the ones that did not (a timeout is not a token cap). */
+export function tripNote(ctx: Ctx, r: AgentRun): string {
+  const min = (ms: number) => Math.round(ms / 60_000);
+  const tokens = `${r.tokens} of ${ctx.run.limits.tokenCap} tokens`;
+  const suspended = r.suspendMs > 0 ? `, ${min(r.suspendMs)} min host suspend excluded` : "";
+  if (r.trip === "token_cap") return `watchdog token_cap: ${tokens} used (cap reached)`;
+  if (r.trip === "stall") return `watchdog stall: no output for ${ctx.run.limits.stallMinutes} min${suspended}; ${tokens} (cap not reached)`;
+  return `watchdog timeout: ran ${min(r.elapsedMs)} min awake against a ${min(r.hardMs)} min wall-clock limit${suspended}; ${tokens} (cap not reached)`;
+}
+
 class SetupFailure extends Error {
   constructor(public readonly reason: string, detail: string) {
     super(`${reason}: ${oneLine(detail).slice(0, 200)}`);
@@ -71,6 +81,7 @@ export async function runSetupCommand(ctx: Ctx, chunkId: string, wt: string): Pr
   const r = await spawnGroup(["bash", "-lc", run.setupCommand], {
     cwd: wt,
     timeoutMs: run.limits.testTimeoutMinutes * 60_000,
+    onSuspend: (gap) => ctx.noteSuspend(gap, "setup", chunkId),
     logFile: join(ctx.logs, `${chunkId}-setup.log`),
   });
   return r.code === 0 && !r.timedOut ? null : `${r.timedOut ? "timed out" : `exit ${r.code}`}; see logs/${chunkId}-setup.log`;
@@ -135,7 +146,7 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
     note: `requeued: quota error: ${oneLine(r.quotaError ?? "").slice(0, 150)}`,
     requeue: true,
   });
-  const tripped = (r: AgentRun): Outcome => fail(`watchdog ${r.trip} after ${r.tokens} tokens`);
+  const tripped = (r: AgentRun): Outcome => fail(tripNote(ctx, r));
 
   let r = await invoke({ kind: "initial", promptFile: join(ctx.prompts, `${chunk.id}.md`) });
   if (r.quotaError) return requeue(r);
