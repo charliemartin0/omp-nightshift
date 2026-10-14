@@ -37,7 +37,9 @@ function forgeBlock(run: RunJson, ctx: PromptCtx): string {
 export function renderChunkPrompt(run: RunJson, chunk: Chunk, ctx: PromptCtx): string {
   const prod = chunk.prodCode
     ? "Production code changes are allowed only as the chunk scope requires."
-    : "Do NOT change production code; only add or fix tests and test fixtures/config.";
+    : chunk.allow.length
+      ? `Do NOT change production code, except these paths the operator approved up front: ${chunk.allow.join(", ")}. Otherwise only add or fix tests and test fixtures/config.`
+      : "Do NOT change production code; only add or fix tests and test fixtures/config.";
   const parallel = run.concurrency > 1
     ? `\nOther overnight chunks run at the same time in their own worktrees: only change files inside ${ctx.wt}, and never touch another worktree or branch.`
     : "";

@@ -36,7 +36,13 @@ export interface RunJson {
   setupCommand: string;
   preflightTest: string;
   limits: Limits;
+  /** how the gate repeats tests: `full` (default) runs the chunk test `repeat` times; `affected` runs the changed/affected tests `repeat` times plus the full chunk test once */
+  gate: GateConfig;
 }
+
+export type GateStrategy = "full" | "affected";
+export interface GateConfig { strategy: GateStrategy; repeat: number }
+export const GATE_DEFAULTS: GateConfig = { strategy: "full", repeat: 3 };
 
 export const RESERVE_PCT_DEFAULT = 40;
 export const MAX_CONCURRENCY = 3;
@@ -51,9 +57,9 @@ export const LIMIT_DEFAULTS: Limits = {
 
 const TOP_KEYS = [
   "version", "repo", "repoName", "date", "goal", "runDir", "worktreeRoot", "unit", "remote", "trunk", "forge",
-  "prMode", "stopAt", "safetyCap", "selfReview", "concurrency", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits",
+  "prMode", "stopAt", "safetyCap", "selfReview", "concurrency", "maxPrs", "floors", "reservePct", "models", "setupCommand", "preflightTest", "limits", "gate",
 ];
-const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview", "concurrency"];
+const OPTIONAL_KEYS = ["reservePct", "stopAt", "safetyCap", "selfReview", "concurrency", "gate"];
 const MODEL_KEYS = ["plan", "build", "report"];
 
 export function sanitizeRepoName(name: string): string {
@@ -138,6 +144,13 @@ export function validateRunJson(x: unknown): RunJson {
   // Stack mode bases each chunk on the previous one's branch, so its chunks cannot run side by side.
   if (concurrency > 1 && prMode === "stack") throw new Error("run.json: concurrency > 1 requires prMode independent");
 
+  const gateIn = o.gate === undefined ? {} : obj(o.gate, "gate");
+  noUnknown(gateIn, Object.keys(GATE_DEFAULTS), "gate");
+  const gate: GateConfig = {
+    strategy: gateIn.strategy === undefined ? GATE_DEFAULTS.strategy : str(gateIn, "strategy", /^(full|affected)$/) as GateStrategy,
+    repeat: gateIn.repeat === undefined ? GATE_DEFAULTS.repeat : num(gateIn.repeat, "gate.repeat", 1, 10, true),
+  };
+
   return {
     version: 1,
     repo,
@@ -162,6 +175,7 @@ export function validateRunJson(x: unknown): RunJson {
     setupCommand: str(o, "setupCommand", undefined, true),
     preflightTest: str(o, "preflightTest"),
     limits: l,
+    gate,
   };
 }
 

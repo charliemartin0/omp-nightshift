@@ -197,8 +197,26 @@ Restore uses the repository's own NuGetAudit settings; when `setupCommand` alrea
 `dotnet restore`, that global setup/baseline covers it instead. No NuGetAudit overrides are added.
 Conventional `cd <directory> && dotnet test <target>` commands retain their working directory for restore.
 
-An optional backlog line `- needs: browser, docker, dotnet` declares requirements. Test commands
-mentioning dotnet, Docker/TestContainers or Playwright/Cypress infer the obvious needs. Frontend work
+More tool checks run only when a pending chunk needs them, and each failure names its fix:
+
+- `playwright`: Playwright's browser cache (`PLAYWRIGHT_BROWSERS_PATH` or `~/.cache/ms-playwright`) holds the
+  Chromium revision pinned by the repo's installed `playwright-core` (repo root or one level down), or any Chromium
+  when `node_modules` isn't installed in the main checkout
+- `lsp`: `typescript-language-server` on `PATH`
+- `jev`: `TYPESAFE_API_KEY` in the environment or in `~/.config/typesafe/env`
+- `apicompat`: `apicompat` on `PATH` or listed by `dotnet tool list` (local manifest or `-g`)
+
+A global `disk` check needs 10 GB free on the worktree volume (`OMP_NIGHTSHIFT_MIN_FREE_GB` overrides this), and it warns
+below 25 GB. Pending TypeScript chunks without a language server get a launch warning unless they declare `needs: lsp`,
+which blocks them instead.
+
+After the checks, launch prints one `preflight: N problem(s)` block listing each failed check, the chunks it blocks
+and how to fix it. `launch --strict` refuses to start while any check fails. Without it, a missing tool only blocks
+the chunks that need it, as before.
+
+An optional backlog line `- needs: browser, docker, dotnet, playwright, lsp, jev, apicompat` declares requirements. Test commands
+mentioning dotnet, Docker/TestContainers, Playwright/Cypress or apicompat infer the obvious needs (Playwright adds both
+`browser` and `playwright`), and a test, scope or done-when mentioning Jev/TypeSafe adds `jev`. Frontend work
 whose rules require UI smoke/screenshots must explicitly declare `browser` when its test command does
 not mention it. A need-scoped failure blocks only affected pending chunks, with an `env: preflight …`
 note. Each failing need check gets one retry after 15 s; no browsers are installed, permissions changed,
@@ -206,9 +224,43 @@ services configured or MCP config edited. Environment rechecks skip power/git-cl
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
 
+## Plan lint
+
+`launch` (and `bun src/cli.ts lint <backlog.md>`, exit 3 when anything is flagged) lists pending `prod-code: no`
+chunks that look like they'll need production changes they aren't allowed to make, so the operator can approve them
+before the night starts instead of finding them blocked in the morning. A chunk is flagged when its scope or done-when:
+
+- names a non-test file (not a `*.test.*` or `*.spec.*` file, a `tests/`, `__tests__/`, `e2e/` or fixtures path, `*Tests.cs`, a
+  `*.Tests` project or a test-runner config), or
+- uses phrases such as "production fix", "aria-label", "seed", "migration", "endpoint", "tsconfig" or "duplicate export".
+
+A chunk is also flagged when its proof command is only a lint, type or analyzer check with no test run. To approve one, set
+`prod-code: yes`, or add `- allow: <globs>` to permit just those production paths. `allow` is passed to the agent
+as the only production files it may change, and it silences the phrase and proof-command heuristics for that chunk.
+
+## Gate strategy
+
+`gate` in `run.json` is optional and defaults to `{ "strategy": "full", "repeat": 3 }`, the original behaviour: the
+chunk test runs three times, all passing is `passed`, exactly one failure is `flaky`, more is a failure.
+`repeat` (1-10) sets how many times the flake-detection runs happen.
+
+`"strategy": "affected"` runs only the tests the chunk touched `repeat` times for flake detection, then the full chunk
+test once as the broad check. A failed broad run is retried once, and passing on that retry counts as `flaky`. One failed
+affected run is also `flaky`, and anything more fails. An affected run whose runner reports "No tests found" passes.
+The affected command is:
+
+- the chunk's optional `- affected-test:` backlog line, with `{base}` replaced by the chunk's start commit and
+  `{files}` by its changed files, shell-quoted (for example `yarn test:e2e:affected --base {base}`), or
+- derived from a single-command `test` (optionally `cd <dir> && …`): Playwright gets `--only-changed=<base>`,
+  vitest `--changed <base>`, jest `--changedSince=<base>`, and `dotnet test` a `--filter` over the changed
+  `*Test(s).cs` classes.
+
+When nothing can be derived (a compound command, an existing filter, no changed test class), that chunk falls back to
+the full strategy. Each decision is logged as `gate_strategy {strategy, affected|fallback, changedFiles}`.
+
 ## Gate environment retry
 
-Each gate runs the chunk test three times. When every failed run carries an environmental signature (a port already
+Each gate runs its planned test runs (see Gate strategy). When every failed run carries an environmental signature (a port already
 in use such as `EADDRINUSE` or Playwright's "http://localhost:9999 is already used", `ENOSPC`, an out-of-memory kill or
 exit 137), the gate does not wake the agent. It stops listeners on the named ports only when their working directory is
 inside this run's `worktreeRoot` (its own leftover dev servers; anything else is reported and left alone), waits 2 s and
