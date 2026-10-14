@@ -206,9 +206,29 @@ services configured or MCP config edited. Environment rechecks skip power/git-cl
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
 
+## Gate strategy
+
+`gate` in `run.json` is optional and defaults to `{ "strategy": "full", "repeat": 3 }`, the original behaviour: the
+chunk test runs three times, all passing is `passed`, exactly one failure is `flaky`, more is a failure.
+`repeat` (1-10) sets how many times the flake-detection runs happen.
+
+`"strategy": "affected"` runs only the tests the chunk touched `repeat` times for flake detection, then the full chunk
+test once as the broad check. A failed broad run is retried once, and passing on that retry counts as `flaky`. One failed
+affected run is also `flaky`, and anything more fails. An affected run whose runner reports "No tests found" passes.
+The affected command is:
+
+- the chunk's optional `- affected-test:` backlog line, with `{base}` replaced by the chunk's start commit and
+  `{files}` by its changed files, shell-quoted (for example `yarn test:e2e:affected --base {base}`), or
+- derived from a single-command `test` (optionally `cd <dir> && …`): Playwright gets `--only-changed=<base>`,
+  vitest `--changed <base>`, jest `--changedSince=<base>`, and `dotnet test` a `--filter` over the changed
+  `*Test(s).cs` classes.
+
+When nothing can be derived (a compound command, an existing filter, no changed test class), that chunk falls back to
+the full strategy. Each decision is logged as `gate_strategy {strategy, affected|fallback, changedFiles}`.
+
 ## Gate environment retry
 
-Each gate runs the chunk test three times. When every failed run carries an environmental signature (a port already
+Each gate runs its planned test runs (see Gate strategy). When every failed run carries an environmental signature (a port already
 in use such as `EADDRINUSE` or Playwright's "http://localhost:9999 is already used", `ENOSPC`, an out-of-memory kill or
 exit 137), the gate does not wake the agent. It stops listeners on the named ports only when their working directory is
 inside this run's `worktreeRoot` (its own leftover dev servers; anything else is reported and left alone), waits 2 s and
