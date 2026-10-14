@@ -7,6 +7,7 @@ import { spawnGroup } from "./proc";
 import { type EnvSignature, type Recovery, classifyEnvFailure, envSummary, freeOwnPorts } from "./envfail";
 import { sweepLogger } from "./sweep";
 
+/** Default number of gate runs (`gate.repeat` in run.json). */
 export const TEST_RUNS = 3;
 
 export interface FlakyTest { name: string; message: string }
@@ -37,14 +38,14 @@ export function parseFailedTests(log: string): FlakyTest[] {
 }
 
 /** Replace the gate-owned section without disturbing subsequent PR sections. */
-export function withFlakySection(body: string, tests: FlakyTest[], failedRun: number): string {
+export function withFlakySection(body: string, tests: FlakyTest[], failedRun: number, ran = `ran the chunk test ${TEST_RUNS} times`): string {
   const lines = body.split("\n");
   const start = lines.findIndex((l) => l === "## Flaky tests");
   if (start >= 0) {
     const next = lines.findIndex((l, i) => i > start && l.startsWith("## "));
     lines.splice(start, (next < 0 ? lines.length : next) - start);
   }
-  return `${lines.join("\n").trimEnd()}\n\n## Flaky tests\n\nThe overnight gate ran the chunk test 3 times; run ${failedRun} failed.\n\n${tests.map((t) => `- \`${t.name}\`: ${t.message}`).join("\n")}\n`;
+  return `${lines.join("\n").trimEnd()}\n\n## Flaky tests\n\nThe overnight gate ${ran}; run ${failedRun} failed.\n\n${tests.map((t) => `- \`${t.name}\`: ${t.message}`).join("\n")}\n`;
 }
 
 export interface GateInput {
@@ -138,27 +139,89 @@ async function checkCommit(g: GateInput): Promise<Check> {
     : { ok: false, detail: `no new commit since ${g.startSha.slice(0, 7)}` };
 }
 
-type TestsCheck = Check & { passes: number; flakyTests?: FlakyTest[]; failedRun?: number; env?: string; envRetry?: EnvRetry };
+type TestsCheck = Check & { passes: number; runs: number; ran: string; flakyTests?: FlakyTest[]; failedRun?: number; env?: string; envRetry?: EnvRetry };
 interface EnvRetry {
   signature: string;
   freed: Recovery["freed"];
   foreign: Recovery["foreign"];
 }
 
-/** One attempt: three runs of the chunk's test command: 3/3 pass, 2/3 pass flaky, else fail. */
+const shq = (v: string): string => `'${v.replace(/'/g, "'\\''")}'`;
+
+/**
+ * The command that runs only the tests a chunk touched, for the `affected` gate strategy, or null when none can be
+ * derived (the gate then falls back to the full strategy). An explicit `affected-test` wins; `{base}` and `{files}`
+ * are substituted. Otherwise a single runner command (optionally behind `cd <dir> &&`) gets its native flag:
+ * Playwright `--only-changed=<base>`, vitest `--changed <base>`, jest `--changedSince=<base>`, and dotnet test a
+ * `--filter` over the changed test classes.
+ */
+export function affectedCommand(test: string, base: string, changed: string[], explicit = ""): string | null {
+  if (explicit) return explicit.replaceAll("{base}", base).replaceAll("{files}", changed.map(shq).join(" "));
+  const m = /^(\s*cd\s+(?:"[^"]+"|'[^']+'|[^\s;&|]+)\s*&&\s*)?([^;&|`$()<>]+)$/.exec(test);
+  if (!m) return null;
+  const prefix = m[1] ?? "";
+  const body = m[2].trimEnd();
+  if (/\bplaywright\b/.test(body)) return /--only-changed/.test(body) ? null : `${prefix}${body} --only-changed=${base}`;
+  if (/\bvitest\b/.test(body)) return /--changed\b|--related\b/.test(body) ? null : `${prefix}${body} --changed ${base}`;
+  if (/\bjest\b/.test(body)) return /--changedSince|--onlyChanged|-o\b/.test(body) ? null : `${prefix}${body} --changedSince=${base}`;
+  if (/\bdotnet\s+test\b/.test(body)) {
+    if (/--filter\b/.test(body)) return null;
+    const classes = [...new Set(changed.flatMap((f) => /(?:^|\/)(\w*Tests?)\.cs$/.exec(f)?.[1] ?? []))];
+    return classes.length ? `${prefix}${body} --filter "${classes.map((c) => `FullyQualifiedName~${c}`).join("|")}"` : null;
+  }
+  return null;
+}
+
+/** Runner output for "nothing matched the changed files": an affected run with no tests passes. */
+export const NO_TESTS_RE = /No tests found|No test files found|No tests ran|No test is available/i;
+
+interface PlannedRun { cmd: string; kind: "repeat" | "full" }
+
+/** Which commands the gate runs: `repeat` x chunk test (full), or `repeat` x affected + 1 x chunk test (affected). */
+export async function gatePlan(g: GateInput): Promise<{ runs: PlannedRun[]; ran: string; strategy: string }> {
+  const { strategy, repeat } = g.ctx.run.gate;
+  const full = (): { runs: PlannedRun[]; ran: string; strategy: string } => ({
+    runs: Array.from({ length: repeat }, () => ({ cmd: g.chunk.test, kind: "repeat" as const })),
+    ran: `ran the chunk test ${repeat} time${repeat === 1 ? "" : "s"}`,
+    strategy: "full",
+  });
+  if (strategy === "full") return full();
+  const diff = await git(g.wt, ["diff", "--name-only", `${g.startSha}...HEAD`]);
+  const changed = diff.code === 0 ? diff.stdout.split("\n").filter(Boolean) : [];
+  const cmd = affectedCommand(g.chunk.test, g.startSha, changed, g.chunk.affectedTest);
+  g.ctx.ledger.log("gate_strategy", { chunk: g.chunk.id, strategy: cmd ? "affected" : "full", ...(cmd ? { affected: cmd } : { fallback: "no affected command could be derived" }), changedFiles: changed.length });
+  if (!cmd) return full();
+  return {
+    runs: [...Array.from({ length: repeat }, () => ({ cmd, kind: "repeat" as const })), { cmd: g.chunk.test, kind: "full" }],
+    ran: `ran the affected tests ${repeat} time${repeat === 1 ? "" : "s"} and the chunk test once`,
+    strategy: "affected",
+  };
+}
+
+/**
+ * One attempt. Full strategy (default, `repeat` 3): all pass ok, exactly one failure flaky, else fail. Affected
+ * strategy: the affected command `repeat` times for flake detection, then the full chunk test once; a failed full run
+ * is retried once (pass on retry = flaky). Ok needs every run to pass; one failed affected run or a full run that
+ * passes only on retry is flaky; anything more fails.
+ */
 async function runTestsOnce(g: GateInput, attempt: number): Promise<TestsCheck & { signatures: EnvSignature[] }> {
   const { ctx, chunk } = g;
+  const plan = await gatePlan(g);
   let passes = 0;
+  let runs = 0;
+  let repeatFails = 0;
+  let fullFails = 0;
   let lastFail = "";
   let failedLog = "";
   let failedOffset = 0;
   let failedRun = 0;
   const failedRuns: { signature: EnvSignature | null }[] = [];
-  for (let k = 1; k <= TEST_RUNS; k++) {
+  const runOne = async (cmd: string, kind: PlannedRun["kind"]): Promise<boolean> => {
+    const k = ++runs;
     // the first attempt keeps the documented name; an env retry logs next to it so the evidence is not mixed
     const logFile = join(ctx.logs, `${chunk.id}-test-${attempt > 1 ? `env${attempt}-` : ""}${k}.log`);
     const offset = existsSync(logFile) ? statSync(logFile).size : 0;
-    const r = await spawnGroup(["bash", "-lc", chunk.test], {
+    const r = await spawnGroup(["bash", "-lc", cmd], {
       cwd: g.wt,
       env: { CI: "1" },
       timeoutMs: ctx.run.limits.testTimeoutMinutes * 60_000,
@@ -167,26 +230,43 @@ async function runTestsOnce(g: GateInput, attempt: number): Promise<TestsCheck &
       onSweep: sweepLogger(ctx, `gate-test-${k}`, chunk.id),
       logFile,
     });
-    if (r.code === 0 && !r.timedOut) passes++;
+    const affectedEmpty = plan.strategy === "affected" && kind === "repeat" && !r.timedOut && r.code !== 0 && NO_TESTS_RE.test(readSince(logFile, offset));
+    if ((r.code === 0 && !r.timedOut) || affectedEmpty) {
+      passes++;
+      return true;
+    }
+    failedLog = logFile;
+    failedOffset = offset;
+    failedRun = k;
+    // drop spawnGroup's `$ argv` header: the test command's own text must never look like evidence
+    failedRuns.push({ signature: r.timedOut ? null : classifyEnvFailure(readSince(logFile, offset).replace(/^\$ [^\n]*\n/, ""), r.code) });
+    lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
+    return false;
+  };
+  for (const run of plan.runs) {
+    if (await runOne(run.cmd, run.kind)) continue;
+    if (run.kind === "repeat") repeatFails++;
     else {
-      failedLog = logFile;
-      failedOffset = offset;
-      failedRun = k;
-      // drop spawnGroup's `$ argv` header: the test command's own text must never look like evidence
-      failedRuns.push({ signature: r.timedOut ? null : classifyEnvFailure(readSince(logFile, offset).replace(/^\$ [^\n]*\n/, ""), r.code) });
-      lastFail = `run ${k} ${r.timedOut ? "timed out" : `exit ${r.code}`}, log ${logFile}:\n${tail(logFile)}`;
+      fullFails++;
+      if (await runOne(run.cmd, run.kind)) continue;
+      fullFails++;
     }
   }
   const signatures = failedRuns.flatMap((f) => (f.signature ? [f.signature] : []));
-  if (passes === TEST_RUNS) return { ok: true, passes, detail: `tests ${passes}/${TEST_RUNS}`, signatures };
-  if (passes === TEST_RUNS - 1) return { ok: true, passes, detail: `flaky ${passes}/${TEST_RUNS}`, flakyTests: parseFailedTests(readSince(failedLog, failedOffset)), failedRun, signatures };
+  const base = { passes, runs, ran: plan.ran };
+  const failures = repeatFails + fullFails;
+  if (failures === 0) return { ok: true, ...base, detail: `tests ${passes}/${runs}`, signatures };
+  const flaky = plan.strategy === "affected"
+    ? (repeatFails === 1 && fullFails === 0 && plan.runs.length >= 3) || (repeatFails === 0 && fullFails === 1)
+    : failures === 1 && runs >= 2;
+  if (flaky) return { ok: true, ...base, detail: `flaky ${passes}/${runs}`, flakyTests: parseFailedTests(readSince(failedLog, failedOffset)), failedRun, signatures };
   // environmental only when EVERY failed run carries an environment signature
   const env = signatures.length === failedRuns.length && signatures.length > 0 ? signatures : [];
-  return { ok: false, passes, detail: `tests ${passes}/${TEST_RUNS} (${chunk.test})\n${lastFail}`, signatures: env, ...(env.length ? { env: envSummary(env) } : {}) };
+  return { ok: false, ...base, detail: `tests ${passes}/${runs} (${chunk.test})\n${lastFail}`, signatures: env, ...(env.length ? { env: envSummary(env) } : {}) };
 }
 
 /**
- * Three test runs. When all of them fail with an environmental signature (port in use, OOM, ...), the gate cleans up
+ * The planned test runs (see runTestsOnce). When all failed runs fail with an environmental signature (port in use, OOM, ...), the gate cleans up
  * (stops this run's own leftover listeners) and runs the whole attempt once more, spending no agent tokens. A second
  * environmental failure is reported as `env` so the chunk is blocked as an environment problem, not fix-resumed.
  */
@@ -247,7 +327,7 @@ export async function runGate(g: GateInput): Promise<GateResult> {
   if (pr) checks.pr = pr;
 
   const failures = Object.values(checks).filter((c) => !c.ok).map((c) => c.detail);
-  const flaky = tests.ok && tests.passes < TEST_RUNS;
+  const flaky = tests.ok && tests.passes < tests.runs;
   const onlyTests = Object.entries(checks).every(([name, c]) => c.ok || name === "tests");
   const env = !tests.ok && onlyTests ? tests.env : undefined;
   const ok = failures.length === 0;
@@ -258,7 +338,7 @@ export async function runGate(g: GateInput): Promise<GateResult> {
       const viewed = await spawnGroup(["gh", "pr", "view", String(pr.pr.number), "--repo", g.slug, "--json", "body", "-q", ".body"], { cwd: g.wt, timeoutMs: 60_000 });
       if (viewed.code === 0 && !viewed.timedOut) {
         const file = join(g.ctx.logs, `${g.chunk.id}-pr-body.md`);
-        writeFileSync(file, withFlakySection(viewed.stdout, tests.flakyTests, tests.failedRun));
+        writeFileSync(file, withFlakySection(viewed.stdout, tests.flakyTests, tests.failedRun, tests.ran));
         const edited = await spawnGroup(["gh", "pr", "edit", String(pr.pr.number), "--repo", g.slug, "--body-file", file], { cwd: g.wt, timeoutMs: 60_000 });
         prBodyUpdated = edited.code === 0 && !edited.timedOut;
       }
@@ -266,7 +346,7 @@ export async function runGate(g: GateInput): Promise<GateResult> {
   }
   const head = (await git(g.wt, ["rev-parse", "--short=7", "HEAD"])).stdout.trim();
   const where = pr?.pr ? `PR #${pr.pr.number} ${pr.pr.url}` : `branch ${g.branch} @ ${head}`;
-  const extras = [flaky ? `flaky ${tests.passes}/${TEST_RUNS}` : "", pr?.redrafted ? "redrafted" : ""].filter(Boolean);
+  const extras = [flaky ? `flaky ${tests.passes}/${tests.runs}` : "", pr?.redrafted ? "redrafted" : ""].filter(Boolean);
   const note = extras.length ? `${where} (${extras.join(", ")})` : where;
   g.ctx.ledger.log("gate", { chunk: g.chunk.id, ok, flaky, checks, ...(tests.flakyTests ? { flakyTests: tests.flakyTests } : {}), ...(prBodyUpdated !== undefined ? { prBodyUpdated } : {}) });
   return { ok, flaky, failures, ...(env ? { env } : {}), note };
