@@ -49,7 +49,7 @@ test("explicit needs and test-command heuristics are unioned", () => {
   const input = md.replace("- test: `npm test -- cart`", "- needs: browser, docker dotnet browser\n- test: `dotnet test X && docker ps && npx playwright test`");
   const chunk = parseBacklog(input).chunks[0];
   expect(chunk.needs).toEqual(["browser", "docker", "dotnet"]);
-  expect(chunkNeeds(chunk)).toEqual(["browser", "docker", "dotnet"]);
+  expect(chunkNeeds(chunk)).toEqual(["browser", "docker", "dotnet", "playwright"]);
   expect(chunkNeeds({ ...chunk, needs: [], test: "dotnet test X && TestContainers && Cypress" })).toEqual(["dotnet", "docker", "browser"]);
   expect(() => parseBacklog(md.replace("- test: `npm test -- cart`", "- needs: unknown\n- test: t"))).toThrow("backlog: cart-tests: invalid needs unknown");
 });

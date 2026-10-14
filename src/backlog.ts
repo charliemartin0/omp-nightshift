@@ -1,8 +1,8 @@
 export type Status =
   | "pending" | "running" | "passed" | "flaky" | "failed" | "blocked" | "skipped" | "stopped";
 
-export type Need = "browser" | "docker" | "dotnet";
-export const NEEDS: readonly Need[] = ["browser", "docker", "dotnet"];
+export type Need = "browser" | "docker" | "dotnet" | "playwright" | "lsp" | "jev" | "apicompat";
+export const NEEDS: readonly Need[] = ["browser", "docker", "dotnet", "playwright", "lsp", "jev", "apicompat"];
 
 export interface Chunk {
   id: string;
@@ -15,6 +15,8 @@ export interface Chunk {
   needs: Need[];
   /** optional command for the gate's `affected` strategy; `{base}` is the chunk's start commit, `{files}` its changed files */
   affectedTest: string;
+  /** production paths (globs) approved up front for a `prod-code: no` chunk */
+  allow: string[];
 }
 
 const STATUSES: readonly string[] = [
@@ -86,6 +88,7 @@ export function parseBacklog(md: string): { goal: string; chunks: Chunk[] } {
       note: f.note ?? "",
       needs: needs as Need[],
       affectedTest: unwrap(f["affected-test"] ?? ""),
+      allow: [...new Set((f.allow ?? "").split(/[,\s]+/).map(unwrap).filter(Boolean))],
     });
   }
   if (!chunks.length) throw new Error("backlog: no chunks");
@@ -98,6 +101,9 @@ export function chunkNeeds(c: Chunk): Need[] {
   if (/\bdotnet\b/.test(c.test)) needs.add("dotnet");
   if (/\bdocker\b|testcontainers/i.test(c.test)) needs.add("docker");
   if (/playwright|cypress/i.test(c.test)) needs.add("browser");
+  if (/playwright/i.test(c.test)) needs.add("playwright");
+  if (/\bapicompat\b/i.test(c.test)) needs.add("apicompat").add("dotnet");
+  if (/\bjev\b|typesafe/i.test(`${c.test} ${c.scope} ${c.doneWhen}`)) needs.add("jev");
   return [...needs];
 }
 
