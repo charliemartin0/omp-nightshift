@@ -197,14 +197,46 @@ Restore uses the repository's own NuGetAudit settings; when `setupCommand` alrea
 `dotnet restore`, that global setup/baseline covers it instead. No NuGetAudit overrides are added.
 Conventional `cd <directory> && dotnet test <target>` commands retain their working directory for restore.
 
-An optional backlog line `- needs: browser, docker, dotnet` declares requirements. Test commands
-mentioning dotnet, Docker/TestContainers or Playwright/Cypress infer the obvious needs. Frontend work
+More tool checks run only when a pending chunk needs them, and each failure names its fix:
+
+- `playwright`: Playwright's browser cache (`PLAYWRIGHT_BROWSERS_PATH` or `~/.cache/ms-playwright`) holds the
+  Chromium revision pinned by the repo's installed `playwright-core` (repo root or one level down), or any Chromium
+  when `node_modules` isn't installed in the main checkout
+- `lsp`: `typescript-language-server` on `PATH`
+- `jev`: `TYPESAFE_API_KEY` in the environment or in `~/.config/typesafe/env`
+- `apicompat`: `apicompat` on `PATH` or listed by `dotnet tool list` (local manifest or `-g`)
+
+A global `disk` check needs 10 GB free on the worktree volume (`OMP_NIGHTSHIFT_MIN_FREE_GB` overrides this), and it warns
+below 25 GB. Pending TypeScript chunks without a language server get a launch warning unless they declare `needs: lsp`,
+which blocks them instead.
+
+After the checks, launch prints one `preflight: N problem(s)` block listing each failed check, the chunks it blocks
+and how to fix it. `launch --strict` refuses to start while any check fails. Without it, a missing tool only blocks
+the chunks that need it, as before.
+
+An optional backlog line `- needs: browser, docker, dotnet, playwright, lsp, jev, apicompat` declares requirements. Test commands
+mentioning dotnet, Docker/TestContainers, Playwright/Cypress or apicompat infer the obvious needs (Playwright adds both
+`browser` and `playwright`), and a test, scope or done-when mentioning Jev/TypeSafe adds `jev`. Frontend work
 whose rules require UI smoke/screenshots must explicitly declare `browser` when its test command does
 not mention it. A need-scoped failure blocks only affected pending chunks, with an `env: preflight …`
 note. Each failing need check gets one retry after 15 s; no browsers are installed, permissions changed,
 services configured or MCP config edited. Environment rechecks skip power/git-clean checks.
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
+
+## Plan lint
+
+`launch` (and `bun src/cli.ts lint <backlog.md>`, exit 3 when anything is flagged) lists pending `prod-code: no`
+chunks that look like they'll need production changes they aren't allowed to make, so the operator can approve them
+before the night starts instead of finding them blocked in the morning. A chunk is flagged when its scope or done-when:
+
+- names a non-test file (not a `*.test.*` or `*.spec.*` file, a `tests/`, `__tests__/`, `e2e/` or fixtures path, `*Tests.cs`, a
+  `*.Tests` project or a test-runner config), or
+- uses phrases such as "production fix", "aria-label", "seed", "migration", "endpoint", "tsconfig" or "duplicate export".
+
+A chunk is also flagged when its proof command is only a lint, type or analyzer check with no test run. To approve one, set
+`prod-code: yes`, or add `- allow: <globs>` to permit just those production paths. `allow` is passed to the agent
+as the only production files it may change, and it silences the phrase and proof-command heuristics for that chunk.
 
 ## Gate strategy
 

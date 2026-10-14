@@ -8,6 +8,7 @@ import { windowsSleep, windowsTools } from "./keepawake";
 import type { Ledger } from "./ledger";
 import { errMsg, readLines, sleep, spawnGroup, startGroup } from "./proc";
 import type { RunJson } from "./runjson";
+import { FIXES, apicompat, disk, jev, lsp, playwrightBrowsers } from "./toolchecks";
 
 export interface Check {
   name: string;
@@ -16,6 +17,8 @@ export interface Check {
   warn?: boolean;
   detail: string;
   need?: Need;
+  /** how to fix a failed check, shown in the launch summary */
+  fix?: string;
 }
 
 const PS = process.env.OMP_OVERNIGHT_POWER_DIR || "/sys/class/power_supply";
@@ -232,12 +235,32 @@ export async function runPreflight(run: RunJson, o: PreflightOptions): Promise<C
     add(await evaluate("browser", () => browser(budget), "browser"));
     add(await evaluate("playwright_mcp", () => playwrightMcp(budget), "browser"));
   }
+  if (!o.recheck) add(await evaluate("disk", () => disk(run)));
+  if (o.needs.includes("playwright")) add(await evaluate("playwright_browsers", () => playwrightBrowsers(run), "playwright"));
+  if (o.needs.includes("lsp")) add(await evaluate("lsp", lsp, "lsp"));
+  if (o.needs.includes("jev")) add(await evaluate("jev", jev, "jev"));
+  if (o.needs.includes("apicompat")) add(await evaluate("apicompat", () => apicompat(run, budget), "apicompat"));
   let dotnet: Check | undefined;
   add(await evaluate("baseline_test", () => baselineTest(run, o.logFile, async (wt) => {
     if (o.needs.includes("dotnet")) dotnet = await evaluate("dotnet", () => dotnetRestore(run, wt, o, budget), "dotnet");
   }, budget)));
   if (dotnet) add(dotnet);
   return results;
+}
+
+/** One block listing every failed check, the chunks it blocks and how to fix it; empty when all passed. */
+export function preflightSummary(chunks: Chunk[], checks: Check[]): string {
+  const failed = checks.filter((c) => !c.ok);
+  if (!failed.length) return "";
+  return [
+    `preflight: ${failed.length} problem(s):`,
+    ...failed.map((c) => {
+      const ids = c.need ? chunksBlockedBy(chunks, [c]).map((b) => b.id) : [];
+      const scope = c.need ? (ids.length ? `blocks ${ids.join(", ")}` : "blocks no pending chunk") : "blocks the launch";
+      const fix = c.fix ?? (c.need ? FIXES[c.need] : undefined);
+      return `  - ${c.name}: ${oneLine(c.detail).slice(0, 200)} [${scope}]${fix ? `\n    fix: ${fix}` : ""}`;
+    }),
+  ].join("\n");
 }
 
 /** Pending chunks whose tool needs intersect a failed need-scoped check (first matching check wins). */

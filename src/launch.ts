@@ -3,7 +3,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseBacklog, setChunkStatus } from "./backlog";
 import { writeOverlay } from "./overlayfile";
-import { chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
+import { lintBacklog, lintText } from "./planlint";
+import { chunksBlockedBy, preflightRequirements, preflightSummary, runPreflight } from "./preflight";
+import { lspWarning } from "./toolchecks";
 import { type SpawnResult, sleep, spawnGroup } from "./proc";
 import { type RunJson, loadRunJson } from "./runjson";
 
@@ -56,7 +58,7 @@ async function startAndVerify(argv: string[], unit: string): Promise<{ ok: boole
 }
 
 /** Validate, write overlay, run preflight synchronously, then start the detached systemd unit. Exit code. */
-export async function launch(runJsonPath: string, dryRun: boolean, cliPath: string, retryBlocked = false): Promise<number> {
+export async function launch(runJsonPath: string, dryRun: boolean, cliPath: string, retryBlocked = false, strict = false): Promise<number> {
   const runJson = resolve(runJsonPath);
   const run = loadRunJson(runJson);
   const backlog = join(run.runDir, "backlog.md");
@@ -82,6 +84,7 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
     }
   }
 
+  console.log(lintText(lintBacklog(chunks)));
   console.log(`overlay: ${(await writeOverlay(run)).path}`);
   const checks = await runPreflight(run, {
     ledger: null,
@@ -94,7 +97,16 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
       } else console.log(`${c.warn ? "WARN" : c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`);
     },
   });
+  const reqs = preflightRequirements(chunks);
+  const lspWarn = lspWarning(chunks, reqs.needs);
+  if (lspWarn) console.log(`WARN ${lspWarn.name}: ${lspWarn.detail}\n    fix: ${lspWarn.fix}`);
+  const summary = preflightSummary(chunks, checks);
+  if (summary) console.log(summary);
   if (checks.some((c) => !c.ok && !c.need)) return 1;
+  if (strict && checks.some((c) => !c.ok)) {
+    console.error("preflight: --strict refuses to launch while any tool check fails (fix the list above, or launch without --strict to block only the affected chunks)");
+    return 1;
+  }
 
   let res = await startAndVerify(systemdRunArgv(run, lock, "sleep:idle:handle-lid-switch", runJson, cliPath, dryRun), run.unit);
   if (!res.ok && res.denied) {

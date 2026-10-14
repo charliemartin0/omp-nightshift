@@ -35,7 +35,8 @@ Produce 3-12 chunks:
 - Independent: in `independent` PR mode no chunk relies on another chunk's files.
 - Tests only, unless the goal requires production code (`prod-code: yes` only then).
 - `test` is an exact shell command, run from the repo root, that targets only that chunk's tests.
-- Optional `needs: browser, docker, dotnet` lists the tools the work will need. Set `browser` when repo or global rules require real UI smoke, Playwright MCP or screenshots for frontend changes, even if the test command does not mention a browser. Set `docker` when tests need containers and `dotnet` for .NET tests. Test-command heuristics add the obvious ones.
+- Optional `allow: <globs>` on a `prod-code: no` chunk approves just those production paths (e.g. one component for an aria-label fix, `tsconfig.eslint.json`). Prefer it to `prod-code: yes` when the scope names a specific production file.
+- Optional `needs: browser, docker, dotnet, playwright, lsp, jev, apicompat` lists the tools the work will need (`playwright` = Playwright's own browsers installed, `lsp` = typescript-language-server, `jev` = TYPESAFE_API_KEY). Set `browser` when repo or global rules require real UI smoke, Playwright MCP or screenshots for frontend changes, even if the test command does not mention a browser. Set `docker` when tests need containers and `dotnet` for .NET tests. Test-command heuristics add the obvious ones.
 
 - Optional `affected-test` is used by `gate.strategy: affected`: a command that runs only the chunk's touched tests (`{base}` = start commit, `{files}` = changed files). Omit it when the runner can derive one (single Playwright/vitest/jest/dotnet test command). Use `affected` for slow suites (Playwright, large dotnet test projects); keep `full` otherwise.
 
@@ -56,6 +57,7 @@ repo: <abs repo path>
 - done-when: <one line>
 - test: <exact shell command, run from repo root; may be wrapped in one pair of backticks>
 - needs: browser, docker, dotnet
+- allow: <optional; production globs approved up front for a prod-code: no chunk>
 - affected-test: <optional; command running only this chunk's touched tests, {base}/{files} substituted>
 - prod-code: no
 - note:
@@ -105,7 +107,7 @@ Write `<runDir>/run.json` (unknown keys are rejected; `stopAt` is an optional `H
 
 Use the limit defaults shown unless the user asked otherwise; `models.report` is `@smol`.
 
-Show a summary: goal, forge, trunk, PR mode, parallel chunks, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Then run `CLI launch <runDir>/run.json`.
+Show a summary: goal, forge, trunk, PR mode, parallel chunks, the estimate line, safety cap, optional stopAt override, self-review choice, max PRs, floors, reserve, models, chunk table (id, test, needs, status), run dir. Run `CLI lint <runDir>/backlog.md` first and show every flagged chunk; ask the operator to approve each (add `allow:` globs or `prod-code: yes`) or leave it tests-only. Then run `CLI launch <runDir>/run.json --strict` while the operator is present, so missing tools fail the launch with a fix list instead of blocking chunks overnight; drop `--strict` for unattended or chained launches.
 
 - Preflight FAIL: show the failing checks, `ask` `Fix and retry` / `Abort`.
 - Success: print the unit name and the watch/stop commands the CLI printed (`journalctl --user -fu <unit>`, `/skill:overnight status`, `/skill:overnight stop`), tell the user the session can be closed, end the turn.
