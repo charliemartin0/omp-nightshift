@@ -91,7 +91,7 @@ export async function launch(runJsonPath: string, dryRun: boolean, cliPath: stri
       if (!c.ok && c.need) {
         const ids = chunksBlockedBy(chunks, [c]).map((b) => b.id);
         console.log(`WARN ${c.name}: ${c.detail} — chunks needing ${c.need} will be blocked: ${ids.join(", ")}`);
-      } else console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`);
+      } else console.log(`${c.warn ? "WARN" : c.ok ? "PASS" : "FAIL"} ${c.name}: ${c.detail}`);
     },
   });
   if (checks.some((c) => !c.ok && !c.need)) return 1;

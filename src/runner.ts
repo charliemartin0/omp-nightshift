@@ -6,6 +6,7 @@ import { type Ctx, deadline, makeCtx } from "./ctx";
 import { dryRunChunk } from "./dryrun";
 import { estimate, formatCap, loadHistory } from "./estimate";
 import { removeWorktree } from "./git";
+import { type KeepAwake, startKeepAwake } from "./keepawake";
 import { writeOverlay } from "./overlayfile";
 import { type Check, chunksBlockedBy, preflightRequirements, runPreflight } from "./preflight";
 import { errMsg, shutdown } from "./proc";
@@ -190,8 +191,10 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
 
   // Shutdown parks subprocess callers before recording every admitted setup/running chunk. Recovery on relaunch
   // only releases proven pristine setup ownership; agent-started worktrees remain untouched.
+  let keepAwake: KeepAwake | null = null;
   const onSignal = async () => {
     await shutdown();
+    await keepAwake?.stop();
     markInterrupted(ctx);
     process.exit(0);
   };
@@ -207,6 +210,10 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
   let stop: Stop = { reason: "finished" };
   let exitCode = 0;
   try {
+    if (!dryRun) {
+      keepAwake = await startKeepAwake({ leaseFile: join(run.runDir, ".keepawake") });
+      ledger.log("keepawake", { ok: keepAwake.ok, detail: keepAwake.detail });
+    }
     await recoverSetup(ctx);
     const chunks = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks;
     const checks = await runPreflight(run, { ledger, logFile: join(ctx.logs, "preflight.log"), ...preflightRequirements(chunks) });
@@ -227,6 +234,7 @@ export async function runMain(runJsonPath: string, dryRun: boolean): Promise<num
     stop = { reason: "runner_error", detail: errMsg(e) };
     exitCode = 1;
   } finally {
+    await keepAwake?.stop();
     for (const wt of dryWorktrees) {
       try {
         await removeWorktree(run.repo, wt);
