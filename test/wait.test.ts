@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseBacklog } from "../src/backlog";
 import { type Ctx, makeCtx } from "../src/ctx";
-import { MAX_QUOTA_REQUEUES, loop } from "../src/runner";
+import { MAX_QUOTA_REQUEUES, loop, requeueBackoffMs } from "../src/runner";
 import { QUOTA_RECHECK_MS, QUOTA_RESET_SLACK_MS, checkStop } from "../src/stops";
 import { validateRunJson } from "../src/runjson";
 import usage from "./fixtures/usage.json";
@@ -86,12 +86,47 @@ test("reset after stop override -> stopAt without sleeping", async () => {
   expect(state.sleeps).toEqual([]);
 });
 
-test("7d floor breach stops without sleeping", async () => {
+/** Usage under the 7d floors (0.2) until `resetsAt`, healthy afterwards. */
+function underFloor(resetsAt: number) {
+  const u = exhausted(START + HOUR, 0.2);
+  for (const r of u.reports) for (const l of r.limits) if (l.scope.windowId === "7d") l.window.resetsAt = resetsAt;
+  return u;
+}
+
+test("7d floor breach waits for the weekly reset instead of stopping, and the wait does not use up the safety cap", async () => {
   const { ctx, state } = setup();
-  queued(state, ctx, [exhausted(START + HOUR, 0.2)]);
+  const resetsAt = START + 30 * HOUR; // beyond the 12 h safety cap
+  ctx.readUsage = async () => (state.t >= resetsAt ? healthy() : underFloor(resetsAt));
+  expect(await checkStop(ctx, [], 0)).toBeNull();
+  expect(state.t).toBeGreaterThanOrEqual(resetsAt);
+  expect(ctx.capAtMs).toBeGreaterThan(state.t + 11 * HOUR); // cap = original 12 h + the time spent waiting
+  const waits = ledgerLines(ctx).filter((e) => e.event === "quota_wait");
+  expect(waits).toHaveLength(1);
+  expect(waits[0].window).toBe("7d");
+  expect(ledgerLines(ctx).some((e) => e.event === "quota" && String(e.reason).startsWith("quota_f"))).toBe(false);
+});
+
+test("an explicit stopAt still ends a run whose quota resets after it, without sleeping", async () => {
+  const { ctx, state } = setup({ stopAtMs: START + 2 * HOUR });
+  queued(state, ctx, [underFloor(START + 30 * HOUR)]);
   const stop = await checkStop(ctx, [], 0);
-  expect(stop?.reason).toBe("quota_floor");
+  expect(stop?.reason).toBe("stopAt");
   expect(state.sleeps).toEqual([]);
+});
+
+test("a blocked chain with no reset time is re-checked every 10 minutes until the no-progress limit", async () => {
+  const { ctx, state } = setup();
+  const u = healthy() as any;
+  for (const r of u.reports) {
+    r.metadata = { ...(r.metadata ?? {}), limitReached: true };
+    for (const l of r.limits) { l.amount.remainingFraction = 0; l.window.resetsAt = null; }
+  }
+  ctx.readUsage = async () => u;
+  const stop = await checkStop(ctx, [], 0);
+  expect(stop?.reason).toBe("safety_cap");
+  expect(stop?.detail).toContain("reset time unknown");
+  expect(state.sleeps.every((s) => s === QUOTA_RECHECK_MS)).toBe(true);
+  expect(state.t - START).toBe(HOUR);
 });
 
 test("runner re-queues quota deaths without counting failures", async () => {
@@ -112,8 +147,30 @@ test("runner re-queues quota deaths without counting failures", async () => {
   };
   const stop = await loop(ctx, [], fake as any);
   expect(stop.reason).toBe("finished");
-  expect(calls).toEqual(["a", "a", "a", "b"]);
+  expect(calls).toEqual([...Array(MAX_QUOTA_REQUEUES).fill("a"), "b"]);
   const statuses = parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks.map((c) => c.status);
   expect(statuses).toEqual(["passed", "passed"]);
   expect(ledgerLines(ctx).filter((e) => e.event === "quota_wait").length).toBeGreaterThan(0);
+  expect(ledgerLines(ctx).filter((e) => e.event === "quota_requeue")).toHaveLength(MAX_QUOTA_REQUEUES - 1);
+});
+
+test("a chunk that keeps dying on quota errors is marked failed without stopping the run", async () => {
+  const { ctx, state, dir } = setup();
+  const md = (id: string) => `## ${id}\n- status: pending\n- scope: s\n- done-when: d\n- test: t\n- prod-code: no\n- note:\n`;
+  writeFileSync(ctx.backlog, `# Overnight backlog\ngoal: g\nrepo: ${dir}\n\n${md("a")}\n${md("b")}\n${md("c")}`);
+  queued(state, ctx, [healthy()]);
+  const calls: string[] = [];
+  const fake = async (c: Ctx, chunk: { id: string }) => {
+    calls.push(chunk.id);
+    const dies = chunk.id !== "c";
+    c.setStatus(chunk.id, dies ? "pending" : "passed", "x");
+    return { status: dies ? "pending" : "passed", note: "quota", branch: chunk.id, ...(dies ? { requeue: true } : {}) } as any;
+  };
+  const stop = await loop(ctx, [], fake as any);
+  expect(stop.reason).toBe("finished"); // two quota-dead chunks in a row are not "consecutive failures"
+  expect(calls.filter((x) => x === "a")).toHaveLength(MAX_QUOTA_REQUEUES);
+  expect(calls.at(-1)).toBe("c");
+  expect(parseBacklog(readFileSync(ctx.backlog, "utf8")).chunks.map((c) => c.status)).toEqual(["failed", "failed", "passed"]);
+  expect(state.sleeps.slice(0, 3)).toEqual([requeueBackoffMs(1), requeueBackoffMs(2), requeueBackoffMs(3)]);
+  expect(requeueBackoffMs(20)).toBe(10 * 60_000);
 });

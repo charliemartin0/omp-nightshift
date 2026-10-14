@@ -71,19 +71,26 @@ Stop a run with `/skill:overnight stop`; it leaves real worktrees, branches, and
 - `ledger.jsonl` (`ledger.dry-run.jsonl`), `report.md` (`report.dry-run.md`), `report.md.bak` (`report.dry-run.md.bak`)
 - `prompts/<id>.md`, `prompts/report.md`, `prompts/<id>-review.md`
 - `sessions/<id>/` omp session dirs
-- `logs/<id>-omp-<n>.jsonl` raw stream, `logs/<id>-setup.log`, `logs/<id>-test-<k>.log`, `logs/preflight.log`
+- `logs/<id>-omp-<n>.jsonl` raw stream, `logs/<id>-setup.log`, `logs/<id>-test-<k>.log` (`-test-env2-<k>` after a gate environment retry), `logs/preflight.log`
 - `logs/<id>-pr-body.md`, `logs/<id>-review.log`, `reviews/<id>.md`
 
 Worktrees live outside the repo at `~/.omp/overnight/<repoName>/<date>/wt/<chunk-id>`; the run lock is
 `~/.omp/overnight/<repoName>/lock`.
 
 ## Quota
-A provider under its 7d floor (or 7d-exhausted) is unusable but does not stop the run while another provider in the
-build role's fallback chain is usable. A chain provider is also unusable when `limitReached` or below the reserve
-(`reservePct`, default 40) on any window. When every chain provider is unusable and one recovers on a short window,
-the runner logs `quota_wait`, sleeps until the earliest reset + 2 min (re-checking every 10 min), and never past the
-effective deadline (the earlier of the safety cap and optional `stopAt` override). If none can recover (7d only) the run stops with `quota_floor` / `quota_limit_reached`. A
-chunk killed by a quota/429 error returns to `pending` (at most 3 times) without counting as a failure.
+Quota never stops a run: it waits. A provider under its 7d floor (default 7d floors are Anthropic 20%, OpenAI 40%,
+others 20%) or 7d-exhausted is unusable but the run carries on while another provider in the build role's fallback
+chain is usable. A chain provider is also unusable when `limitReached` or below the reserve (`reservePct`, default 40)
+on any window. When every chain provider is unusable, the runner logs `quota_wait` and sleeps until the earliest reset
+of any of them, 7d windows included, plus 2 min (re-checking every 10 min). Waiting for a known future reset counts as
+progress and does not use up the safety cap (the cap is extended by the time slept); an explicit `stopAt` override is
+wall-clock and still ends the run. A window with no reset time, or usage that stays stale after a reset, is re-checked
+every 10 min and bounded by the safety cap and the 60 min no-progress limit. Only unreadable usage with no chain
+(`quota_unknown`) is a stop. A chunk killed by a quota/429 error returns to `pending` (at most 6 times, pausing 1, 2,
+4... up to 10 min between attempts) without counting as a failure, even when the attempts run out.
+
+Free-tier models (`...-free`, `...:free`) are never used, not even as a fallback: they are dropped from every chain in
+the generated overlay and from the quota chain, and `launch` rejects a run whose `models` resolve to one.
 
 ## Stop and safety cap
 
@@ -101,7 +108,7 @@ tokens exceed `tokenCap × chunk count`. Two failed attempts in a row stop with 
 limits consume outcomes in dispatch order, not completion order: passed/flaky resets the consecutive streak;
 blocked/skipped and quota requeues neither count nor reset it. Identical normalized failures accumulate across passes.
 An out-of-order completion holds new admission until earlier attempts finish, so a later pass cannot erase an earlier
-failure limit and fast failures cannot escape accounting behind a slow chunk. Retried attempts get a new dispatch position.
+failure limit and fast failures cannot escape accounting behind a slow chunk. Retried attempts get a new dispatch position. Quota never stops a run (see Quota).
 `status` shows the latest stop reason, finish estimate, safety cap and optional override.
 
 ## Parallel chunks
@@ -146,9 +153,43 @@ resources are retained with a `setup_recovered` explanation. Recovery is idempot
 of real resources. Signal stops still skip self-review and report generation. Dry cleanup failures retain the refused
 worktree, continue the remaining cleanup, and still produce a runner-error report.
 
+## Host suspend
+
+A sleeping host (Windows/WSL sleep, a closed lid) must not look like a hung agent. The agent watchdog, the setup and
+gate test timeouts and quota sleeps all detect a timer that fires 90 s or more late, subtract that gap, and log a
+`host_suspend {where, gapSec}` ledger event. The gap is also removed from the safety cap and the no-progress timer;
+an explicit `stopAt` stays wall-clock. Watchdog trips now say which limit fired, for example
+`watchdog timeout: ran 12 min awake against a 95 min wall-clock limit, 300 min host suspend excluded; 473629 of
+3000000 tokens (cap not reached)`, so a timeout is never reported as a token cap.
+
+## Scope sweep
+
+Every child (omp session, setup, each gate test run) starts under `setsid`. When it exits, the runner SIGTERMs, waits
+3 s and SIGKILLs whatever is left of its process group and, for agent sessions, setup and gate tests, its session.
+That stops orphaned dev servers, headless browsers and `yarn` trees before the next phase, so a stale listener cannot
+fail the next gate with "port already in use" or serve another chunk's worktree. Findings are logged as
+`sweep {phase, found, comms}` ledger events (and `swept` on `omp_exit`). Only processes in the child's own group/session
+are touched; processes that call `setsid` themselves, and everything unrelated, are left alone. Transient systemd scopes
+were rejected because a scope outlives the unit if the runner crashes.
+
+## Keep awake (Windows hosts)
+
+systemd inhibitors only hold locks inside WSL; Windows can still sleep and freeze the VM. Under WSL the runner starts
+a `powershell.exe` helper (`-EncodedCommand`, no admin needed) that calls
+`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` for as long as the runner
+touches `<runDir>/.keepawake` (it exits by itself if the lease goes stale for 2 min or the runner dies). Real runs log
+`keepawake {ok, detail}`; a failed helper is a warning, never a stop. `powershell.exe` and `schtasks.exe` are found on
+PATH or in `/mnt/c/Windows/System32`; `OMP_NIGHTSHIFT_POWERSHELL` / `OMP_NIGHTSHIFT_SCHTASKS` override them and
+`OMP_NIGHTSHIFT_WINDOWS=off` disables everything Windows-specific.
+
+An explicit sleep command beats an execution-state request, so preflight also runs `windows_sleep`: it lists enabled
+non-Microsoft scheduled tasks whose action sleeps, suspends or hibernates the PC. A task whose script no longer exists
+is reported as inert; a live one is a warning (the launch is not blocked) with the exact
+`Disable-ScheduledTask -TaskName '<name>'` fix (set `OMP_NIGHTSHIFT_ALLOW_SCHEDULED_SLEEP=1` to silence it).
+
 ## Preflight
 
-Global checks cover power, a clean main checkout, remote/forge access (including `gh api user`) and the
+Global checks cover power, a clean main checkout, `windows_sleep` (WSL only, warning only), remote/forge access (including `gh api user`) and the
 baseline test in a disposable `_preflight` worktree. A global failure stops the run. Tool checks run only
 for pending chunks that need them: `docker ps`, a real Chrome/Chromium headless DOM render, a configured
 Playwright MCP initialize/navigate call, and `dotnet restore` in the same worktree after the baseline passes.
@@ -164,6 +205,19 @@ note. Each failing need check gets one retry after 15 s; no browsers are install
 services configured or MCP config edited. Environment rechecks skip power/git-clean checks.
 Rechecks do not start at the effective deadline margin; subprocess timeouts and retry sleeps are bounded
 by the remaining deadline.
+
+## Gate environment retry
+
+Each gate runs the chunk test three times. When every failed run carries an environmental signature (a port already
+in use such as `EADDRINUSE` or Playwright's "http://localhost:9999 is already used", `ENOSPC`, an out-of-memory kill or
+exit 137), the gate does not wake the agent. It stops listeners on the named ports only when their working directory is
+inside this run's `worktreeRoot` (its own leftover dev servers; anything else is reported and left alone), waits 2 s and
+re-runs the three tests once. Evidence is logged as `gate_env_retry {signature, freed, foreign}`; the retry's logs are
+`logs/<id>-test-env2-<k>.log` next to the first attempt's `logs/<id>-test-<k>.log`. If the retry still fails
+environmentally, and the tests were the only failing check, the chunk is `blocked` with an `env: gate tests: ...` note
+(its branch stays committed) so it joins the normal environment retry instead of burning fix-resume tokens or inviting
+test-config hacks such as `reuseExistingServer: true`. A real test failure, a mix of environmental and real failures,
+or a timeout is never retried this way. `disk_full` is classified as environmental but not retried.
 
 ## Blocked chunks
 

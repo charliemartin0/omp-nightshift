@@ -47,7 +47,7 @@ test("floors independently constrain concurrent admission, and stricter-only flo
   expect(await checkDispatch(ctx, [], 0, 0)).toBeNull();
   expect(await checkDispatch(ctx, [], 0, 1)).toBe("hold");
   expect(entries(ctx).filter((e) => e.event === "quota_admission").at(-1)).toMatchObject({
-    slots: 2, floors: { "openai-codex": 0.8 }, ok: false, reason: "quota_floor",
+    slots: 2, floors: { "openai-codex": 0.8 }, ok: false, reason: "quota_wait",
   });
 });
 
@@ -76,10 +76,10 @@ test("each admission rechecks fresh usage but base and headroom share the same s
   expect(reads).toBe(3);
 });
 
-test("ordinary floor failure still hard-stops dispatch before additional-slot evaluation", async () => {
+test("ordinary floor failure holds dispatch (quota never stops) before additional-slot evaluation", async () => {
   const { ctx } = setup();
   ctx.readUsage = async () => usage(0.2);
-  expect(await checkDispatch(ctx, [], 0, 1)).toMatchObject({ reason: "quota_floor" });
+  expect(await checkDispatch(ctx, [], 0, 1)).toBe("hold");
   expect(entries(ctx).filter((e) => e.event === "quota_admission")).toHaveLength(0);
 });
 
@@ -91,11 +91,11 @@ test("ordinary short-window exhaustion still holds dispatch without sleeping", a
   expect(entries(ctx).filter((e) => e.event === "quota_admission")).toHaveLength(0);
 });
 
-test("ordinary unrecoverable reserve failure still hard-stops dispatch", async () => {
+test("ordinary reserve failure holds dispatch (quota never stops)", async () => {
   const { ctx } = setup();
   ctx.run.floors = {};
   ctx.readUsage = async () => usage(0.3, 0.95);
-  expect(await checkDispatch(ctx, [], 0, 1)).toMatchObject({ reason: "quota_limit_reached" });
+  expect(await checkDispatch(ctx, [], 0, 1)).toBe("hold");
 });
 
 test("single-chunk quota and stop checks keep their ordinary thresholds", async () => {

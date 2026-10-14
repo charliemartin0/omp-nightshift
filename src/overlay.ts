@@ -1,7 +1,37 @@
 const q = (s: string) => JSON.stringify(s);
 
-/** Overlay YAML: the live modelRoles and fallbackChains verbatim, usageReservePct from the run. */
-export function buildOverlay(roles: Record<string, string>, chains: Record<string, string[]>, reservePct: number): string {
+/** Free-tier models (`...-free`, `...:free`) are never used, not even as a quota fallback. */
+export const isFreeModel = (model: string): boolean => /[-:]free$/i.test(model.trim());
+
+/** Fallback chains without free-tier entries; a chain left empty keeps its key. */
+export function withoutFreeModels(chains: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(chains).map(([k, v]) => [k, v.filter((m) => !isFreeModel(m))]));
+}
+
+/** Throws when a model the run is configured to use directly (or through a role) is a free-tier model. */
+export function assertNoFreeModels(models: Record<string, string>, roles: Record<string, string>): void {
+  for (const [slot, model] of Object.entries(models)) {
+    const resolved = model.startsWith("@") ? roles[model.slice(1)] ?? model : model;
+    if (isFreeModel(resolved)) throw new Error(`run.json models.${slot} resolves to the free model ${resolved}; free models are never used`);
+  }
+}
+
+/** Values omp accepts for `retry.fallbackOn`. */
+export const FALLBACK_ON = ["any", "usage-limit", "except-usage-limit"] as const;
+export type FallbackOn = (typeof FALLBACK_ON)[number];
+export const isFallbackOn = (v: unknown): v is FallbackOn => typeof v === "string" && (FALLBACK_ON as readonly string[]).includes(v);
+
+/**
+ * Overlay YAML: the live modelRoles and fallbackChains verbatim, usageReservePct from the run, and the live
+ * `retry.fallbackOn` when set (otherwise omp's default applies).
+ */
+export function buildOverlay(
+  roles: Record<string, string>,
+  allChains: Record<string, string[]>,
+  reservePct: number,
+  fallbackOn?: FallbackOn,
+): string {
+  const chains = withoutFreeModels(allChains);
   const lines: string[] = ["modelRoles:"];
   for (const [k, v] of Object.entries(roles)) lines.push(`  ${q(k)}: ${q(v)}`);
   lines.push(
@@ -11,6 +41,7 @@ export function buildOverlay(roles: Record<string, string>, chains: Record<strin
     `  usageReservePct: ${reservePct}`,
     "  waitForUsageReset: false",
   );
+  if (fallbackOn) lines.push(`  fallbackOn: ${q(fallbackOn)}`);
   const keys = Object.keys(chains);
   if (keys.length === 0) lines.push("  fallbackChains: {}");
   else {
@@ -32,14 +63,16 @@ export function buildOverlay(roles: Record<string, string>, chains: Record<strin
 export function buildChainProviders(
   model: string,
   roles: Record<string, string>,
-  chains: Record<string, string[]>,
+  allChains: Record<string, string[]>,
 ): string[] {
+  const chains = withoutFreeModels(allChains);
   const entries: (string | undefined)[] = model.startsWith("@")
     ? [roles[model.slice(1)], ...(chains[model.slice(1)] ?? [])]
     : [model, ...(chains[model] ?? [])];
   const out: string[] = [];
   for (const e of entries) {
     if (!e) continue;
+    if (isFreeModel(e)) continue;
     const p = e.split("/")[0];
     if (!out.includes(p)) out.push(p);
   }

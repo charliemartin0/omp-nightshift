@@ -9,6 +9,7 @@ import { STALL_RESUME_MESSAGE, fixResumeMessage, renderChunkPrompt } from "./pro
 import { spawnGroup } from "./proc";
 import { beginSetup } from "./setup";
 import { checkQuota } from "./stops";
+import { sweepLogger } from "./sweep";
 
 export const ENV_BLOCK_RE = /\b(chrom(e|ium)|playwright|browser|docker|socket|permission denied|EACCES|ENOENT|command not found|not installed|ECONNREFUSED|connection refused|daemon|MCP)\b|fail(ed|s)? to (start|launch|connect|initiali[sz]e)|cannot (start|launch|connect|initiali[sz]e)/i;
 
@@ -35,6 +36,16 @@ export interface Outcome {
   stopDetail?: string;
   /** quota death: chunk goes back to pending and is retried after the quota wait */
   requeue?: boolean;
+}
+
+/** Unambiguous trip cause: names the limit that fired and the ones that did not (a timeout is not a token cap). */
+export function tripNote(ctx: Ctx, r: AgentRun): string {
+  const min = (ms: number) => Math.round(ms / 60_000);
+  const tokens = `${r.tokens} of ${ctx.run.limits.tokenCap} tokens`;
+  const suspended = r.suspendMs > 0 ? `, ${min(r.suspendMs)} min host suspend excluded` : "";
+  if (r.trip === "token_cap") return `watchdog token_cap: ${tokens} used (cap reached)`;
+  if (r.trip === "stall") return `watchdog stall: no output for ${ctx.run.limits.stallMinutes} min${suspended}; ${tokens} (cap not reached)`;
+  return `watchdog timeout: ran ${min(r.elapsedMs)} min awake against a ${min(r.hardMs)} min wall-clock limit${suspended}; ${tokens} (cap not reached)`;
 }
 
 class SetupFailure extends Error {
@@ -71,6 +82,9 @@ export async function runSetupCommand(ctx: Ctx, chunkId: string, wt: string): Pr
   const r = await spawnGroup(["bash", "-lc", run.setupCommand], {
     cwd: wt,
     timeoutMs: run.limits.testTimeoutMinutes * 60_000,
+    onSuspend: (gap) => ctx.noteSuspend(gap, "setup", chunkId),
+    sweep: "deep",
+    onSweep: sweepLogger(ctx, "setup", chunkId),
     logFile: join(ctx.logs, `${chunkId}-setup.log`),
   });
   return r.code === 0 && !r.timedOut ? null : `${r.timedOut ? "timed out" : `exit ${r.code}`}; see logs/${chunkId}-setup.log`;
@@ -135,7 +149,7 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
     note: `requeued: quota error: ${oneLine(r.quotaError ?? "").slice(0, 150)}`,
     requeue: true,
   });
-  const tripped = (r: AgentRun): Outcome => fail(`watchdog ${r.trip} after ${r.tokens} tokens`);
+  const tripped = (r: AgentRun): Outcome => fail(tripNote(ctx, r));
 
   let r = await invoke({ kind: "initial", promptFile: join(ctx.prompts, `${chunk.id}.md`) });
   if (r.quotaError) return requeue(r);
@@ -151,6 +165,9 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
 
   const gateInput = { ctx, chunk, wt, branch: plan.branch, startSha, prBase: plan.prBase, slug };
   let gate = await runGate(gateInput);
+  // The machine, not the code, failed the tests (even after the gate's own clean re-run): no agent tokens are spent on it.
+  const envBlock = (): Outcome => ({ status: "blocked", note: `env: gate tests: ${gate.env}; branch ${plan.branch} is committed, work is intact` });
+  if (!gate.ok && gate.env) return envBlock();
   if (!gate.ok) {
     const q = await checkQuota(ctx, chunk.id);
     if (!q.ok && q.reason === "quota_wait") {
@@ -166,6 +183,7 @@ async function executeChunk(ctx: Ctx, plan: ChunkPlan, startSha: string): Promis
     blocked = readBlocked(wt);
     if (blocked) return { status: "blocked", note: blocked };
     gate = await runGate(gateInput);
+    if (!gate.ok && gate.env) return envBlock();
     if (!gate.ok) return fail(`gate failed: ${gate.failures.map((f) => f.split("\n")[0]).join("; ")}`);
   }
   return { status: gate.flaky ? "flaky" : "passed", note: gate.note };

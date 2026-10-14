@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { type Ctx, deadline } from "./ctx";
 import { openAppend, readLines, settle, startGroup } from "./proc";
 import { parseDuration } from "./runjson";
+import { sweepLogger } from "./sweep";
+import { GapDetector, SUSPEND_GAP_MS } from "./suspend";
 import { QUOTA_ERROR_RE, type Trip, Watchdog } from "./watchdog";
 
 export const TICK_MS = 30_000;
@@ -16,11 +18,30 @@ export interface AgentRun {
   sessionId: string | null;
   /** the final assistant message died on a quota / rate-limit error */
   quotaError: string | null;
+  /** awake run time (host-suspend gaps excluded) and the hard limit it was measured against */
+  elapsedMs: number;
+  hardMs: number;
+  /** host-suspend time that was excluded from this invocation's timers */
+  suspendMs: number;
+}
+
+/** Test seams for the tick loop (real clock and 30 s tick otherwise). */
+export interface AgentTuning {
+  tickMs?: number;
+  now?: () => number;
+  gapThresholdMs?: number;
+  /** replaces the computed hard limit */
+  hardMs?: number;
 }
 
 export type OmpMode =
   | { kind: "initial"; promptFile: string }
-  | { kind: "resume"; session: string; message: string };
+  | { kind: "resume"; session: string; message: string }
+  /** resume whose saved model omp could not restore: same message and build model, new session */
+  | { kind: "fresh"; message: string };
+
+/** omp (18.6.3+) refuses `-r` in print/json mode when the session's saved model is gone. */
+export const MODEL_RESTORE_RE = /Could not restore model/i;
 
 export function sessionsDir(ctx: Ctx, chunkId: string): string {
   return join(ctx.sessions, chunkId);
@@ -35,6 +56,12 @@ export function ompArgv(ctx: Ctx, chunkId: string, wt: string, mode: OmpMode): s
       "omp", "-p", "--mode", "json", "--model", models.plan, "--plan-yolo", "--plan-yolo-into", models.build,
       "--max-time", limits.maxTime, "--config", ctx.overlay, "--session-dir", sessionDir, "--cwd", wt,
       "--no-title", `@${mode.promptFile}`,
+    ];
+  }
+  if (mode.kind === "fresh") {
+    return [
+      "omp", "-p", "--mode", "json", "--model", models.build, "--session-dir", sessionDir,
+      "--max-time", limits.resumeMaxTime, "--config", ctx.overlay, "--cwd", wt, "--no-title", mode.message,
     ];
   }
   return [
@@ -76,19 +103,21 @@ export function newestSessionFile(dir: string): string | null {
  */
 export async function runOmp(
   ctx: Ctx,
-  o: { chunk: string; wt: string; n: number; mode: OmpMode; tokensUsed: number },
+  o: { chunk: string; wt: string; n: number; mode: OmpMode; tokensUsed: number; tuning?: AgentTuning },
 ): Promise<AgentRun> {
   const { limits } = ctx.run;
+  const now = o.tuning?.now ?? Date.now;
+  const tickMs = o.tuning?.tickMs ?? TICK_MS;
   const maxTime = o.mode.kind === "initial" ? limits.maxTime : limits.resumeMaxTime;
-  const t0 = Date.now();
-  const hardMs = Math.min(parseDuration(maxTime) + HARD_SLACK_MS, deadline(ctx).atMs - t0);
+  const t0 = now();
+  const hardMs = o.tuning?.hardMs ?? Math.min(parseDuration(maxTime) + HARD_SLACK_MS, deadline(ctx).atMs - t0);
   if (o.tokensUsed >= limits.tokenCap) {
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "token_cap", tokens: o.tokensUsed, detail: "cap already spent; omp not started" });
-    return { code: -1, trip: "token_cap", tokens: o.tokensUsed, sessionId: null, quotaError: null };
+    return { code: -1, trip: "token_cap", tokens: o.tokensUsed, sessionId: null, quotaError: null, elapsedMs: 0, hardMs, suspendMs: 0 };
   }
   if (hardMs <= 0) {
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip: "timeout", tokens: o.tokensUsed, detail: `past ${deadline(ctx).reason} deadline; omp not started` });
-    return { code: -1, trip: "timeout", tokens: o.tokensUsed, sessionId: null, quotaError: null };
+    return { code: -1, trip: "timeout", tokens: o.tokensUsed, sessionId: null, quotaError: null, elapsedMs: 0, hardMs, suspendMs: 0 };
   }
   const wd = new Watchdog({
     now: t0,
@@ -104,34 +133,54 @@ export async function runOmp(
   const g = startGroup(ompArgv(ctx, o.chunk, o.wt, o.mode), { cwd: o.wt });
 
   let trip: Trip | null = null;
+  let restoreFailed = false;
+  let suspendMs = 0;
   let lastMtime = newestMtime(dir);
+  const gaps = new GapDetector(t0, tickMs, o.tuning?.gapThresholdMs ?? SUSPEND_GAP_MS);
   const tick = setInterval(() => {
-    const now = Date.now();
+    const at = now();
+    // A tick that arrives hours late means the host slept: exclude the gap BEFORE any limit is checked.
+    const gap = gaps.sample(at);
+    if (gap > 0) {
+      wd.shift(gap);
+      suspendMs += gap;
+      ctx.noteSuspend(gap, "agent", o.chunk);
+    }
     const m = newestMtime(dir);
     if (m > lastMtime) {
       lastMtime = m;
-      wd.touch(now);
+      wd.touch(at);
     }
-    const t = trip ? null : wd.check(now);
+    const t = trip ? null : wd.check(at);
     if (t) {
       trip = t;
-      ctx.ledger.log("watchdog", { chunk: o.chunk, trip: t, tokens: wd.tokens });
+      ctx.ledger.log("watchdog", {
+        chunk: o.chunk, trip: t, tokens: wd.tokens, tokenCap: limits.tokenCap,
+        elapsedMin: Math.round((at - t0 - suspendMs) / 60_000), hardMin: Math.round(hardMs / 60_000), suspendedMin: Math.round(suspendMs / 60_000),
+      });
       void g.kill();
     }
-  }, TICK_MS);
+  }, tickMs);
 
   const pumps = Promise.all([
     (async () => {
       for await (const line of readLines(g.stdout)) {
         writeSync(out, `${line}\n`);
-        wd.onLine(line, Date.now());
+        if (MODEL_RESTORE_RE.test(line)) restoreFailed = true;
+        wd.onLine(line, now());
       }
     })(),
     (async () => {
-      for await (const line of readLines(g.stderr)) writeSync(err, `${line}\n`);
+      for await (const line of readLines(g.stderr)) {
+        writeSync(err, `${line}\n`);
+        if (MODEL_RESTORE_RE.test(line)) restoreFailed = true;
+      }
     })(),
   ]);
   const code = await g.exited;
+  // Orphans of the session (dev servers, browsers) must not outlive it: they would fail the next phase's ports.
+  const swept = await g.sweep(true);
+  sweepLogger(ctx, "agent", o.chunk)(swept);
   await settle(pumps, 3000); // a stray grandchild must not hold us here
   clearInterval(tick);
   closeSync(out);
@@ -142,7 +191,14 @@ export async function runOmp(
     trip = "token_cap";
     ctx.ledger.log("watchdog", { chunk: o.chunk, trip, tokens: wd.tokens });
   }
+  if (o.mode.kind === "resume" && code !== 0 && !trip && restoreFailed) {
+    ctx.ledger.log("warning", {
+      chunk: o.chunk, kind: "model_restore",
+      detail: `omp could not restore the saved model of session ${o.mode.session}; starting a fresh session with the same message`,
+    });
+    return runOmp(ctx, { ...o, n: o.n + 1, mode: { kind: "fresh", message: o.mode.message }, tokensUsed: wd.tokens });
+  }
   const quotaError = wd.lastError !== null && QUOTA_ERROR_RE.test(wd.lastError) ? wd.lastError : null;
-  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError });
-  return { code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError };
+  ctx.ledger.log("omp_exit", { chunk: o.chunk, code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError, swept: swept.found });
+  return { code, trip, tokens: wd.tokens, sessionId: wd.sessionId, quotaError, elapsedMs: now() - t0 - suspendMs, hardMs, suspendMs };
 }
